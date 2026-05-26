@@ -73,12 +73,12 @@ def call_gemini_with_search() -> list[dict]:
 
     genai.configure(api_key=api_key)
 
-    # google_search_retrieval ツールで grounding。
+    # Gemini 2.x の google_search ツールで grounding。
     # 注意: grounding 使用時は response_mime_type=application/json を併用できないので
     #       生テキストから JSON 部分を抽出する後処理を行う
     model = genai.GenerativeModel(
         MODEL,
-        tools="google_search_retrieval",
+        tools=[{"google_search": {}}],
     )
 
     prompt = build_prompt()
