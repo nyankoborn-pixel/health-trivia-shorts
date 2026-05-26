@@ -29,8 +29,15 @@ MODEL = "gemini-2.5-flash"
 
 DISCLAIMER_SCENE = {
     "id": "disclaimer",
-    "text": "本動画は一般的な健康雑学です。医療行為を代替するものではありません。体調にご不安のある方は医療機関にご相談ください。",
-    "telop": "医療機関にご相談ください",
+    "text": "本動画は一般的な健康雑学です。医療行為を代替するものではありません。体調にご不安のある方は、医療機関にご相談ください。",
+    "subtitles": [
+        "本動画は一般的な",
+        "健康雑学です",
+        "医療行為を代替する",
+        "ものではありません",
+        "体調にご不安の方は",
+        "医療機関にご相談を",
+    ],
     "image_keywords": ["問診", "医者", "医療相談"],
 }
 
@@ -47,9 +54,17 @@ SYSTEM_PROMPT = """あなたは健康雑学 YouTube 動画の台本生成 AI で
 【厳守事項】
 1. 与えられたトピックの body に書かれた事実のみ使用し、新しい事実・数字・固有名詞を捏造しないこと
 2. 医療行為の代替や特定疾患の治療効果を断定しない。「〜と言われています」「〜の可能性があります」など断定を避ける表現を使う
-3. 1 シーンのテロップ (telop) は 20 字以内、ナレーション (text) は 130〜170 字
+3. ナレーション (text) は 130〜170 字。subtitles は text を分割した字幕配列
 4. 各シーンは独立して理解できる単発雑学として完結させる
 5. 「9 割の人が知らない」のような煽り見出しは避け、落ち着いた知的トーン
+
+【字幕 (subtitles) の作り方】★最重要★
+- text を「、」「。」や意味の区切りで自然に分割した配列
+- **各要素は 14 字以内**（必ず守る。15 字以上は禁止）
+- 連結すると text と同じ内容になるよう構成
+- 例: text="朝日を浴びると体内時計がリセットされ、夜の睡眠の質が高まると言われています。"
+  → subtitles=["朝日を浴びると", "体内時計がリセットされ", "夜の睡眠の質が高まると", "言われています"]
+- 1 シーン = 8〜12 個の subtitles 程度
 
 【画像検索キーワード (image_keywords)】
 各シーンの内容に合う「いらすとや」検索ワードを 2〜3 個列挙する。
@@ -66,15 +81,15 @@ SYSTEM_PROMPT = """あなたは健康雑学 YouTube 動画の台本生成 AI で
   "scenes": [
     {
       "id": "01_intro",
-      "text": "ナレーション本文（130〜170字）",
-      "telop": "上部テロップ（20字以内）",
+      "text": "ナレーション本文（130〜170字、句点付き）",
+      "subtitles": ["14字以内の字幕1", "14字以内の字幕2", "...8〜12個"],
       "image_keywords": ["キーワード1", "キーワード2", "キーワード3"]
     },
     ...
   ]
 }
 
-【注意】「いらすとや」「irasutoya」という単語を title/description/text/telop のいずれにも含めないこと（コラボ誤解を避けるため）。"""
+【注意】「いらすとや」「irasutoya」という単語を title/description/text/subtitles のいずれにも含めないこと（コラボ誤解を避けるため）。"""
 
 
 def build_user_prompt(topics: list[dict]) -> str:
@@ -145,6 +160,30 @@ def generate_script(topics: list[dict]) -> dict:
     return parsed
 
 
+def _split_text_to_subtitles(text: str, max_len: int = 14) -> list[str]:
+    """text を句読点 (、 。) で区切り、max_len 字以内のチャンクに自動分割。
+    subtitles が欠落していた時のフォールバック用。
+    """
+    import re as _re
+    pieces = [p for p in _re.split(r"([、。])", text) if p]
+    # 区切り文字を直前のピースに付け戻す
+    merged: list[str] = []
+    for p in pieces:
+        if p in ("、", "。") and merged:
+            merged[-1] += p
+        else:
+            merged.append(p)
+    # max_len 超過のチャンクをさらに細かく割る
+    out: list[str] = []
+    for chunk in merged:
+        while len(chunk) > max_len:
+            out.append(chunk[:max_len])
+            chunk = chunk[max_len:]
+        if chunk:
+            out.append(chunk)
+    return out
+
+
 def validate_script(script: dict) -> dict:
     if "title" not in script or "scenes" not in script:
         raise RuntimeError(f"missing required fields: keys={list(script.keys())}")
@@ -155,20 +194,37 @@ def validate_script(script: dict) -> dict:
 
     forbidden = ("いらすとや", "irasutoya", "イラストや")
     for i, s in enumerate(scenes):
-        # 必須キーチェック。image_keywords は欠落時に telop から自動補完できるので緩める
-        for k in ("text", "telop"):
-            if k not in s:
-                raise RuntimeError(f"scene {i} missing '{k}': scene_keys={list(s.keys())}")
+        # 必須キーチェック
+        if "text" not in s:
+            raise RuntimeError(f"scene {i} missing 'text': scene_keys={list(s.keys())}")
         s.setdefault("id", f"{i+1:02d}")
-        for field in ("text", "telop"):
-            for word in forbidden:
-                if word in s[field]:
-                    raise RuntimeError(f"scene {i} {field} contains forbidden word '{word}'")
-        # image_keywords が無い/空なら telop から推測（モデルが時々忘れる）
+
+        # subtitles 欠落時は text から自動分割
+        subs = s.get("subtitles")
+        if not isinstance(subs, list) or len(subs) == 0:
+            print(f"  [warn] scene {i} missing subtitles, deriving from text")
+            subs = _split_text_to_subtitles(s["text"], max_len=14)
+            s["subtitles"] = subs
+
+        # 各 subtitle の長さチェック（>16 字は警告のみ、make_video 側で折返なしで描画）
+        for j, sub in enumerate(subs):
+            if not isinstance(sub, str) or not sub.strip():
+                raise RuntimeError(f"scene {i} subtitle[{j}] empty or non-string: {sub!r}")
+            if len(sub) > 16:
+                print(f"  [warn] scene {i} subtitle[{j}] too long ({len(sub)}字): {sub}")
+
+        for word in forbidden:
+            if word in s["text"]:
+                raise RuntimeError(f"scene {i} text contains forbidden word '{word}'")
+            for sub in subs:
+                if word in sub:
+                    raise RuntimeError(f"scene {i} subtitle contains forbidden word '{word}'")
+
+        # image_keywords が無い/空なら subtitles[0] から推測
         kws = s.get("image_keywords")
         if not isinstance(kws, list) or len(kws) == 0:
-            print(f"  [warn] scene {i} missing image_keywords, deriving from telop")
-            s["image_keywords"] = [s["telop"][:6]]
+            print(f"  [warn] scene {i} missing image_keywords, deriving from subtitles[0]")
+            s["image_keywords"] = [subs[0][:6]]
 
     for field in ("title", "description"):
         if field in script:
