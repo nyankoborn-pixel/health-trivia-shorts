@@ -1,7 +1,7 @@
 """
 generate_script.py
 
-work/topics.json からトピック候補を読み、Claude API で 5-6 シーン × 30 秒の台本を生成する。
+work/topics.json からトピック候補を読み、Gemini API で 5-6 シーン × 30 秒の台本を生成する。
 各シーンには「ナレーション本文 (text)」「画面に焼き込むテロップ (telop)」「いらすとや検索キーワード (image_keywords)」を含める。
 
 末尾シーンに医療免責定型文を必ず付与する。
@@ -12,18 +12,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
-import anthropic
+import google.generativeai as genai
 
 WORK_DIR = Path("work")
 TOPICS_IN = WORK_DIR / "topics.json"
 SCRIPT_OUT = WORK_DIR / "script.json"
 
-MODEL = "claude-opus-4-5"
+MODEL = "gemini-2.5-flash"
 
-# 末尾に必ず追加する医療免責シーン。LLM 生成と分離して定型化することで規約遵守を確実にする
 DISCLAIMER_SCENE = {
     "id": "disclaimer",
     "text": "本動画は一般的な健康雑学です。医療行為を代替するものではありません。体調にご不安のある方は医療機関にご相談ください。",
@@ -81,27 +81,30 @@ def build_user_prompt(topics: list[dict]) -> str:
 
 
 def generate_script(topics: list[dict]) -> dict:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set")
+        raise RuntimeError("GEMINI_API_KEY not set")
 
-    client = anthropic.Anthropic(api_key=api_key)
+    genai.configure(api_key=api_key)
 
-    print(f"[script] generating with {len(topics)} candidate topics")
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": build_user_prompt(topics)}],
+    print(f"[script] generating with {len(topics)} candidate topics ({MODEL})")
+    model = genai.GenerativeModel(
+        MODEL,
+        generation_config={
+            "temperature": 0.7,
+            "top_p": 0.95,
+            "max_output_tokens": 4096,
+            "response_mime_type": "application/json",
+        },
+        system_instruction=SYSTEM_PROMPT,
     )
+    response = model.generate_content(build_user_prompt(topics))
 
-    text_blocks = [b.text for b in message.content if getattr(b, "type", None) == "text"]
-    raw = text_blocks[-1].strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw
-        raw = raw.rsplit("```", 1)[0].strip()
+    text = response.text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```\s*$", "", text)
 
-    return json.loads(raw)
+    return json.loads(text)
 
 
 def validate_script(script: dict) -> dict:

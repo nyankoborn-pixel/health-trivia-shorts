@@ -51,7 +51,7 @@ jobs:
 
       - name: Build video
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           VOICEVOX_URL: http://localhost:50021
         run: python -m src.build
 

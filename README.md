@@ -18,9 +18,9 @@
 ## パイプライン
 
 ```
-collect_topics.py   Google 検索上位記事を Claude が複数参照しトピック候補生成
+collect_topics.py   Gemini が Google 検索 (grounding) で複数記事を横断しトピック候補生成
         ↓
-generate_script.py  Claude API で 5-6 トピック × 30 秒の台本生成
+generate_script.py  Gemini API で 5-6 トピック × 30 秒の台本生成
         ↓
 fetch_irasutoya.py  シーンキーワードからいらすとや画像を取得
         ↓
@@ -37,12 +37,13 @@ build.py            上記を順次実行、output/ に成果物を出力
 
 ```powershell
 # 事前: VOICEVOX エンジンをローカル起動 (http://localhost:50021)
-# 事前: ANTHROPIC_API_KEY を環境変数にセット
+# 事前: GEMINI_API_KEY を環境変数にセット
 
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python src\build.py
+$env:GEMINI_API_KEY = "AIza..."
+python -m src.build
 ```
 
 成果物: `output\YYYY-MM-DD_<title>.mp4` と同フォルダのサムネ画像

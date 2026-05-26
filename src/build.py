@@ -3,8 +3,8 @@ build.py
 
 健康雑学動画パイプラインの統合エントリポイント。
 順次:
-  1. collect_topics  Google 検索 + Claude でトピック候補を抽出
-  2. generate_script Claude で台本生成
+  1. collect_topics  Gemini が Google 検索 (grounding) でトピック候補を抽出
+  2. generate_script Gemini で台本生成
   3. fetch_irasutoya いらすとや画像取得
   4. synth_voice     VOICEVOX で音声合成
   5. make_video      ffmpeg で動画組み立て
