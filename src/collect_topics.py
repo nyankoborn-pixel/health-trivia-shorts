@@ -22,6 +22,8 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 
+from src.gemini_retry import call_with_retry
+
 WORK_DIR = Path("work")
 WORK_DIR.mkdir(exist_ok=True)
 TOPICS_OUT = WORK_DIR / "topics.json"
@@ -91,14 +93,17 @@ def call_gemini_with_search() -> list[dict]:
 
     # === Step 1: grounding で自由文ファクト収集 ===
     print(f"[collect] step1: research with {MODEL} + google_search")
-    research = client.models.generate_content(
-        model=MODEL,
-        contents=build_research_prompt(),
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            temperature=0.85,
-            max_output_tokens=8192,
+    research = call_with_retry(
+        lambda: client.models.generate_content(
+            model=MODEL,
+            contents=build_research_prompt(),
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.85,
+                max_output_tokens=8192,
+            ),
         ),
+        label="collect-step1",
     )
     research_text = (research.text or "").strip()
     (WORK_DIR / "_collect_raw.txt").write_text(research_text, encoding="utf-8")
@@ -108,14 +113,17 @@ def call_gemini_with_search() -> list[dict]:
 
     # === Step 2: JSON モードで構造化（grounding なし、温度低め）===
     print(f"[collect] step2: structuring to JSON")
-    structured = client.models.generate_content(
-        model=MODEL,
-        contents=build_structuring_prompt(research_text),
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.2,
-            max_output_tokens=8192,
+    structured = call_with_retry(
+        lambda: client.models.generate_content(
+            model=MODEL,
+            contents=build_structuring_prompt(research_text),
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.2,
+                max_output_tokens=8192,
+            ),
         ),
+        label="collect-step2",
     )
     json_text = (structured.text or "").strip()
     (WORK_DIR / "_collect_json.txt").write_text(json_text, encoding="utf-8")

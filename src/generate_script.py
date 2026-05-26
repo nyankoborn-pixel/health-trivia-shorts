@@ -19,6 +19,8 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 
+from src.gemini_retry import call_with_retry
+
 WORK_DIR = Path("work")
 TOPICS_IN = WORK_DIR / "topics.json"
 SCRIPT_OUT = WORK_DIR / "script.json"
@@ -96,16 +98,19 @@ def generate_script(topics: list[dict]) -> dict:
     client = genai.Client(api_key=api_key)
 
     print(f"[script] generating with {len(topics)} candidate topics ({MODEL})")
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=build_user_prompt(topics),
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            temperature=0.7,
-            top_p=0.95,
-            max_output_tokens=8192,
+    response = call_with_retry(
+        lambda: client.models.generate_content(
+            model=MODEL,
+            contents=build_user_prompt(topics),
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                temperature=0.7,
+                top_p=0.95,
+                max_output_tokens=8192,
+            ),
         ),
+        label="generate_script",
     )
 
     text = (response.text or "").strip()
