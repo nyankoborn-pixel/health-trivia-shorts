@@ -135,22 +135,25 @@ def download_image(image_url: str) -> Path | None:
     return p
 
 
-def _try_articles(article_urls: list[str]) -> Path | None:
-    """検索結果の記事 URL 群を順に試し、最初に画像が取れたものを返す。"""
+def _try_articles(article_urls: list[str], exclude: set[Path]) -> Path | None:
+    """検索結果の記事 URL 群を順に試し、exclude に含まれない最初の画像を返す。"""
     for url in article_urls:
         image_url = extract_image_url(url)
         if not image_url:
             continue
         img = download_image(image_url)
-        if img is not None:
-            return img
+        if img is None:
+            continue
+        if img in exclude:
+            continue
+        return img
     return None
 
 
-def find_image_for_keywords(keywords: list[str]) -> Path | None:
-    """キーワード列を順に試し、最初にヒットした画像をダウンロードして返す。
-    各キーワードについて、検索上位 MAX_FALLBACK_RESULTS 件全てを試す。
-    全て 0 件なら、各キーワードを 2 文字以上含む短縮版で再検索する。
+def find_one_image(keywords: list[str], exclude: set[Path]) -> Path | None:
+    """exclude に被らない 1 枚を探す。
+    キーワードを順に試し、各キーワードで検索上位 MAX_FALLBACK_RESULTS 件を確認。
+    全滅なら短縮キーワードで再試行。
     """
     tried: list[str] = []
     for kw in keywords:
@@ -162,7 +165,7 @@ def find_image_for_keywords(keywords: list[str]) -> Path | None:
         if not article_urls:
             print(f"  [miss] no result for '{kw}'")
             continue
-        img = _try_articles(article_urls)
+        img = _try_articles(article_urls, exclude)
         if img is not None:
             return img
 
@@ -176,7 +179,7 @@ def find_image_for_keywords(keywords: list[str]) -> Path | None:
             print(f"  [fallback] retry with shorter keyword '{short}'")
             article_urls = search_keyword(short)
             if article_urls:
-                img = _try_articles(article_urls)
+                img = _try_articles(article_urls, exclude)
                 if img is not None:
                     return img
 
@@ -192,29 +195,68 @@ def main() -> int:
     scenes = script["scenes"]
     print(f"[fetch_irasutoya] fetching images for {len(scenes)} scenes")
 
-    image_map: dict[str, str] = {}
+    # いらすとや商用利用 20 点ルール対策。ユニーク取得が IMAGE_CAP に達したら
+    # 以降は新規取得を停止し、既出画像を使い回す。
+    IMAGE_CAP = 20
+    DEFAULT_PER_SCENE = 3
+    DISCLAIMER_PER_SCENE = 1
+    import random as _random
+
+    all_used: list[Path] = []  # 取得済みユニーク画像（順序保持）
+    image_map: dict[str, list[str]] = {}
     missing: list[str] = []
+
     for i, scene in enumerate(scenes):
         sid = scene.get("id", f"{i+1:02d}")
         kws = scene.get("image_keywords", [])
-        print(f"\n[scene {sid}] keywords: {kws}")
-        img_path = find_image_for_keywords(kws)
-        if img_path is None:
-            # disclaimer シーンは compliance critical なので必ず描画する。
-            # リポ同梱の固定イラストにフォールバック。
-            if sid == "disclaimer" and DISCLAIMER_FALLBACK.exists():
-                print(f"  [fallback] using bundled disclaimer image: {DISCLAIMER_FALLBACK}")
-                img_path = DISCLAIMER_FALLBACK
-            else:
-                print(f"  [WARN] no image found for scene {sid}")
-                missing.append(sid)
-                continue
-        # シーン用に images_dir へコピー（同じ画像でも上書きで使い回す）
-        ext = img_path.suffix
-        dst = IMAGES_DIR / f"scene_{i:02d}{ext}"
-        dst.write_bytes(img_path.read_bytes())
-        image_map[sid] = str(dst.resolve())
-        print(f"  -> {dst}")
+        n_target = DISCLAIMER_PER_SCENE if sid == "disclaimer" else DEFAULT_PER_SCENE
+        print(f"\n[scene {sid}] keywords: {kws} (target {n_target} images, cap={len(all_used)}/{IMAGE_CAP})")
+
+        scene_imgs: list[Path] = []
+
+        # === Stage 1: ユニーク画像取得（残り枠の範囲で）===
+        for slot in range(n_target):
+            if len(all_used) >= IMAGE_CAP:
+                print(f"  [cap] reached {IMAGE_CAP} unique images; switching to reuse mode")
+                break
+            img = find_one_image(kws, exclude=set(all_used) | set(scene_imgs))
+            if img is None:
+                print(f"  [miss] no fresh image found for slot {slot}")
+                break
+            scene_imgs.append(img)
+            all_used.append(img)
+            print(f"  + slot {slot}: {img.name} (unique now {len(all_used)})")
+
+        # === Stage 2: 不足分は既出画像から使い回し ===
+        if len(scene_imgs) < n_target:
+            if not all_used:
+                # 1 枚も無いとき: disclaimer は固定フォールバック
+                if sid == "disclaimer" and DISCLAIMER_FALLBACK.exists():
+                    scene_imgs.append(DISCLAIMER_FALLBACK)
+                    print(f"  [fallback] using bundled disclaimer image")
+            while len(scene_imgs) < n_target and all_used:
+                # 同シーン内重複を避けつつ random pick
+                candidates = [p for p in all_used if p not in scene_imgs]
+                if not candidates:
+                    candidates = all_used  # 仕方なく重複
+                pick = _random.choice(candidates)
+                scene_imgs.append(pick)
+                print(f"  ↺ slot {len(scene_imgs) - 1}: reused {pick.name}")
+
+        if not scene_imgs:
+            print(f"  [WARN] no image found for scene {sid}")
+            missing.append(sid)
+            continue
+
+        # シーンごとに images_dir へコピー（make_video が使うパス）
+        out_paths: list[str] = []
+        for j, img in enumerate(scene_imgs):
+            ext = img.suffix
+            dst = IMAGES_DIR / f"scene_{i:02d}_{j:02d}{ext}"
+            dst.write_bytes(img.read_bytes())
+            out_paths.append(str(dst.resolve()))
+        image_map[sid] = out_paths
+        print(f"  -> {len(out_paths)} image(s) placed")
 
     IMAGES_OUT.write_text(
         json.dumps({"images": image_map, "missing": missing}, ensure_ascii=False, indent=2),

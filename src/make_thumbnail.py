@@ -63,12 +63,18 @@ def main() -> int:
     title = script.get("title", "健康雑学")
 
     # シーン 1 の画像をサムネに採用（なければシーン 2, 3, ...）
+    # images[sid] は list の可能性があるので最初の 1 枚を取る
     image_path: Path | None = None
     for scene in script["scenes"]:
         sid = scene.get("id")
         if sid in images_info["images"]:
-            image_path = Path(images_info["images"][sid])
-            break
+            entry = images_info["images"][sid]
+            if isinstance(entry, list) and entry:
+                image_path = Path(entry[0])
+            elif isinstance(entry, str):
+                image_path = Path(entry)
+            if image_path is not None:
+                break
     if image_path is None or not image_path.exists():
         print("ERROR: no scene image available for thumbnail", file=sys.stderr)
         return 1

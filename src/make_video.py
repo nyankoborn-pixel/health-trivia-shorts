@@ -75,12 +75,15 @@ def wrap_text(s: str, width: int) -> str:
 SUB_FONTSIZE = 96
 SUB_Y_TOP = int(H * 0.04)         # 上字幕の y 位置 (≈ 43)
 SUB_Y_BOTTOM = H - SUB_FONTSIZE - int(H * 0.04)  # 下字幕の y 位置 (≈ 941)
+SUB_COLOR_NORMAL = "black"
+SUB_COLOR_IMPORTANT = "0xDC2626"  # 強調用の赤 (Tailwind red-600 相当)
 # 画像エリア: 上下字幕の隙間に収まるサイズ。垂直中央配置。
 IMG_HEIGHT_RATIO = 0.50           # H の 50% (= 540px)
 
 
-def _compute_subtitle_timing(subtitles: list[str], duration: float) -> list[tuple[float, float, int]]:
-    """各 subtitle の (開始秒, 終了秒, position) を計算。
+def _compute_subtitle_timing(subtitles: list[dict], duration: float) -> list[tuple[float, float, int, str, bool]]:
+    """各 subtitle の (開始秒, 終了秒, position, text, important) を計算。
+    - subtitles は [{text, important}, ...] 形式
     - 開始秒は累積文字数比率で proportional に割り振る
     - position は index % 2 (0=top, 1=bottom)
     - 終了秒は「同じ position の次の subtitle の開始秒」まで持続。
@@ -88,15 +91,15 @@ def _compute_subtitle_timing(subtitles: list[str], duration: float) -> list[tupl
     """
     if not subtitles:
         return []
-    total_chars = sum(len(s) for s in subtitles) or 1
+    total_chars = sum(len(s["text"]) for s in subtitles) or 1
     starts: list[float] = []
     cum = 0
     for s in subtitles:
         starts.append(duration * cum / total_chars)
-        cum += len(s)
+        cum += len(s["text"])
 
     n = len(subtitles)
-    out: list[tuple[float, float, int]] = []
+    out: list[tuple[float, float, int, str, bool]] = []
     for i in range(n):
         pos = i % 2
         next_same = None
@@ -105,8 +108,22 @@ def _compute_subtitle_timing(subtitles: list[str], duration: float) -> list[tupl
                 next_same = j
                 break
         end = starts[next_same] if next_same is not None else duration + 0.5
-        out.append((starts[i], end, pos))
+        s = subtitles[i]
+        out.append((starts[i], end, pos, s["text"], bool(s.get("important", False))))
     return out
+
+
+def _compute_image_segments(n_images: int, duration: float) -> list[tuple[float, float]]:
+    """画像ローテーションの (開始秒, 終了秒) を等分で計算。"""
+    if n_images <= 0:
+        return []
+    slot = duration / n_images
+    segs: list[tuple[float, float]] = []
+    for i in range(n_images):
+        start = i * slot
+        end = (i + 1) * slot if i < n_images - 1 else duration + 0.5
+        segs.append((start, end))
+    return segs
 
 
 def make_scene_clip(
@@ -114,44 +131,67 @@ def make_scene_clip(
     index: int,
     scene: dict,
     wav_path: Path,
-    image_path: Path,
+    image_paths: list[Path],
     duration: float,
     out_path: Path,
     font_bold: str,
 ) -> None:
     """1 シーン分の mp4 を生成。
-    - 白背景中央に画像（縮小）配置
+    - 白背景中央に画像（縮小）。複数枚なら等分時間でローテーション
     - subtitles 配列を上下交互に焼き込み、同位置の次が出るまで持続表示
+    - important=True の subtitle は赤色 (SUB_COLOR_IMPORTANT) で描画
     """
+    if not image_paths:
+        raise RuntimeError(f"scene {index} has no images")
+
     subtitles = scene.get("subtitles") or []
     timings = _compute_subtitle_timing(subtitles, duration)
+    img_segs = _compute_image_segments(len(image_paths), duration)
 
-    # 各 subtitle テキストをファイルに書き出す（drawtext textfile 経由で安全に渡す）
+    # 各 subtitle テキストをファイルに書き出す
     sub_files: list[Path] = []
     for i, s in enumerate(subtitles):
         f = WORK_DIR / f"sub_{index:02d}_{i:02d}.txt"
-        f.write_text(s, encoding="utf-8")
+        f.write_text(s["text"], encoding="utf-8")
         sub_files.append(f)
 
     img_h = int(H * IMG_HEIGHT_RATIO)
     img_y = (H - img_h) // 2  # 垂直中央配置
 
     ff_bold = ff_path(font_bold)
+    n_imgs = len(image_paths)
 
-    # 入力構成: [0:v]=image, [1:a]=wav
-    fc_parts = [
+    # 入力: [0..n_imgs-1]=images (loop 1), [n_imgs]=wav
+    cmd_inputs: list[str] = []
+    for p in image_paths:
+        cmd_inputs += ["-loop", "1", "-i", str(p)]
+    cmd_inputs += ["-i", str(wav_path)]
+
+    # フィルタ構築
+    fc_parts: list[str] = [
         f"color=c=white:s={W}x{H}:r={FPS}[bg]",
-        f"[0:v]scale=-1:{img_h}:flags=lanczos,format=rgba[img]",
-        f"[bg][img]overlay=x=(W-w)/2:y={img_y}[base]",
     ]
-    last_label = "base"
-    for i, ((start, end, pos), sub_file) in enumerate(zip(timings, sub_files)):
+    # 各画像を scale → 順次 overlay (enable で時間切替)
+    for i in range(n_imgs):
+        fc_parts.append(f"[{i}:v]scale=-1:{img_h}:flags=lanczos,format=rgba[img{i}]")
+    last_label = "bg"
+    for i, (start, end) in enumerate(img_segs):
+        next_label = f"base{i}" if i < n_imgs - 1 else "base"
+        fc_parts.append(
+            f"[{last_label}][img{i}]overlay=x=(W-w)/2:y={img_y}:"
+            f"enable='between(t\\,{start:.3f}\\,{end:.3f})'[{next_label}]"
+        )
+        last_label = next_label
+
+    # 字幕 drawtext を順次重ねる
+    for i, ((start, end, pos, _text, important), sub_file) in enumerate(zip(timings, sub_files)):
         y = SUB_Y_TOP if pos == 0 else SUB_Y_BOTTOM
+        color = SUB_COLOR_IMPORTANT if important else SUB_COLOR_NORMAL
         ff_text = ff_path(sub_file)
         next_label = f"v{i}"
         fc_parts.append(
             f"[{last_label}]drawtext=fontfile='{ff_bold}':textfile='{ff_text}':"
-            f"fontcolor=black:fontsize={SUB_FONTSIZE}:"
+            f"fontcolor={color}:fontsize={SUB_FONTSIZE}:"
             f"x=(w-text_w)/2:y={y}:"
             f"borderw=2:bordercolor=white:"
             f"enable='between(t\\,{start:.3f}\\,{end:.3f})'[{next_label}]"
@@ -162,12 +202,13 @@ def make_scene_clip(
     fc_parts.append(f"[{last_label}]null[v]")
     filter_complex = ";".join(fc_parts)
 
+    audio_input_idx = n_imgs  # wav は images の次
+
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
-        "-loop", "1", "-i", str(image_path),
-        "-i", str(wav_path),
+        *cmd_inputs,
         "-filter_complex", filter_complex,
-        "-map", "[v]", "-map", "1:a",
+        "-map", "[v]", "-map", f"{audio_input_idx}:a",
         "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
         "-r", str(FPS),
         "-ar", "48000", "-ac", "2",
@@ -176,12 +217,12 @@ def make_scene_clip(
         "-t", f"{duration:.3f}",
         str(out_path),
     ]
-    print(f"  [scene {index}] {duration:.2f}s, {len(subtitles)} subs -> {out_path.name}")
+    n_important = sum(1 for t in timings if t[4])
+    print(f"  [scene {index}] {duration:.2f}s, {n_imgs} imgs, {len(subtitles)} subs ({n_important} important) -> {out_path.name}")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         log_file = WORK_DIR / f"_ffmpeg_scene_{index:02d}.log"
         log_file.write_text(r.stderr, encoding="utf-8")
-        # filter_complex も別途保存（長すぎてログから切れがちなので）
         (WORK_DIR / f"_ffmpeg_scene_{index:02d}.filter.txt").write_text(filter_complex, encoding="utf-8")
         print(r.stderr[-3000:], file=sys.stderr)
         raise RuntimeError(f"ffmpeg failed for scene {index} (full log: {log_file})")
@@ -265,10 +306,14 @@ def main() -> int:
         if sid not in images:
             print(f"WARN: no image for scene {sid}, skipping clip", file=sys.stderr)
             continue
-        image_path = Path(images[sid])
+        # images[sid] は list（複数画像）。後方互換で str 単体も許容
+        raw_imgs = images[sid]
+        if isinstance(raw_imgs, str):
+            raw_imgs = [raw_imgs]
+        image_paths = [Path(p) for p in raw_imgs]
         clip_out = WORK_DIR / f"clip_{i:02d}.mp4"
         make_scene_clip(
-            index=i, scene=scene, wav_path=wav_path, image_path=image_path,
+            index=i, scene=scene, wav_path=wav_path, image_paths=image_paths,
             duration=duration, out_path=clip_out, font_bold=font_bold,
         )
         clip_paths.append(clip_out)
