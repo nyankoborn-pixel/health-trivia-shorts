@@ -26,6 +26,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Logs
+# Logs - 一般的な .log は無視。
+# topic_history.jsonl は重複ネタ防止のために**コミット必須**なので除外しない。
 *.log
-logs/*.jsonl

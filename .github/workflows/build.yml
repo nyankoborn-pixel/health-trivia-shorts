@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write   # topic_history.jsonl を push し戻すため
 
     services:
       voicevox:
@@ -55,8 +55,40 @@ jobs:
           VOICEVOX_URL: http://localhost:50021
         run: python -m src.build
 
-      - name: Upload output artifact
-        if: always()
+      # === OneDrive 自動アップロード ===
+      # 事前に GH Secret `RCLONE_CONF` に rclone.conf の中身（OneDrive remote 設定済み）を
+      # 登録しておくこと。未登録の場合はこの step は skip し、フォールバックの artifact が残る。
+      - name: Setup rclone (if RCLONE_CONF is set)
+        id: rclone_setup
+        if: success()
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          if [ -z "$RCLONE_CONF" ]; then
+            echo "rclone_ready=false" >> $GITHUB_OUTPUT
+            echo "::notice::RCLONE_CONF secret not set; skipping OneDrive upload (artifact fallback used)"
+            exit 0
+          fi
+          curl -s https://rclone.org/install.sh | sudo bash > /dev/null
+          mkdir -p ~/.config/rclone
+          printf '%s' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          rclone listremotes
+          echo "rclone_ready=true" >> $GITHUB_OUTPUT
+
+      - name: Upload output to OneDrive
+        id: cloud_upload
+        if: success() && steps.rclone_setup.outputs.rclone_ready == 'true'
+        run: |
+          DATE=$(TZ=Asia/Tokyo date +%Y-%m-%d)
+          RUN=${{ github.run_number }}
+          rclone copy output/ "onedrive:health-trivia-shorts/${DATE}/run-${RUN}/" --progress
+          echo "uploaded=true" >> $GITHUB_OUTPUT
+          echo "::notice::Uploaded to OneDrive: health-trivia-shorts/${DATE}/run-${RUN}/"
+
+      # === GitHub 側 artifact フォールバック ===
+      # OneDrive アップロードが成功した場合は不要なので skip。失敗時 or rclone 未設定時のみ保存。
+      - name: Upload output artifact (fallback)
+        if: always() && (steps.cloud_upload.outputs.uploaded != 'true')
         uses: actions/upload-artifact@v4
         with:
           name: health-trivia-${{ github.run_number }}
@@ -64,7 +96,7 @@ jobs:
             output/*.mp4
             output/*.jpg
             output/*.json
-          retention-days: 7
+          retention-days: 2
 
       - name: Upload work intermediates on failure
         if: failure()
@@ -73,3 +105,17 @@ jobs:
           name: work-debug-${{ github.run_number }}
           path: work/
           retention-days: 3
+
+      # === ネタ重複防止履歴をリポにコミット ===
+      - name: Commit topic history
+        if: success()
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add logs/topic_history.jsonl 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "no history changes to commit"
+          else
+            git commit -m "chore: update topic history [skip ci]"
+            git push
+          fi

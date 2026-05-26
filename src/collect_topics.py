@@ -28,6 +28,11 @@ WORK_DIR = Path("work")
 WORK_DIR.mkdir(exist_ok=True)
 TOPICS_OUT = WORK_DIR / "topics.json"
 
+# 過去使用トピックの履歴（重複ネタ防止のためコミットされる）
+HISTORY_PATH = Path("logs/topic_history.jsonl")
+HISTORY_WINDOW_DAYS = 60     # この期間内の既出トピックは除外対象
+HISTORY_MAX_EXCLUDE = 80     # プロンプトに渡す最大件数（古い順に切り詰め）
+
 MODEL = "gemini-2.5-flash"
 
 TARGET_TOPIC_COUNT = 7
@@ -50,10 +55,56 @@ SEED_THEMES = [
 ]
 
 
+def load_recent_titles(window_days: int = HISTORY_WINDOW_DAYS, limit: int = HISTORY_MAX_EXCLUDE) -> list[str]:
+    """過去 window_days 日以内に使用したトピックタイトルを返す（新しい順）。limit 件まで。"""
+    if not HISTORY_PATH.exists():
+        return []
+    cutoff = datetime.now(timezone(timedelta(hours=9))) - timedelta(days=window_days)
+    titles: list[tuple[datetime, str]] = []
+    for line in HISTORY_PATH.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+            ts = datetime.fromisoformat(rec["timestamp"])
+            for t in rec.get("topics", []):
+                if ts > cutoff:
+                    titles.append((ts, t))
+        except (json.JSONDecodeError, KeyError, ValueError):
+            continue
+    titles.sort(key=lambda x: x[0], reverse=True)
+    return [t for _, t in titles[:limit]]
+
+
+def append_to_history(topics: list[dict]) -> None:
+    """生成したトピックを履歴に追記。"""
+    HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "timestamp": datetime.now(timezone(timedelta(hours=9))).isoformat(),
+        "topics": [t.get("title", "") for t in topics],
+    }
+    with HISTORY_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
 def build_research_prompt() -> str:
     """Step 1: grounding で自由文ファクト収集するためのプロンプト"""
     today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
     seeds = random.sample(SEED_THEMES, k=4)
+
+    # 過去使用済みトピック（重複防止）
+    recent = load_recent_titles()
+    exclude_block = ""
+    if recent:
+        bullet = "\n".join(f"  - {t}" for t in recent)
+        exclude_block = f"""
+
+【★既出トピック（過去 {HISTORY_WINDOW_DAYS} 日以内に使用済み・今回は避ける）】
+{bullet}
+
+上記と同じテーマや切り口は提案しないこと。違う角度・違う対象を必ず選ぶ。"""
+
     return f"""今日は {today} です。日本の中高年向け雑学 YouTube 動画用のネタを Google 検索で収集してください。
 
 【条件】
@@ -63,7 +114,7 @@ def build_research_prompt() -> str:
 - 信頼できる情報源（公的機関、大学、辞書・事典、大手メディア、専門家解説サイトなど）を複数横断して根拠を揃える
 - 個人ブログ・アフィリエイトサイト・断定的に治療効果を謳う記事は除外
 - 健康・医療系トピックでは断定表現を避ける。「〜と言われています」など
-- 参考テーマ（これに限らず自由に展開してよい）: {", ".join(seeds)}
+- 参考テーマ（これに限らず自由に展開してよい）: {", ".join(seeds)}{exclude_block}
 
 【出力】 各トピックを以下のフォーマットで列挙してください（自由文で構いません）:
 
@@ -191,6 +242,10 @@ def main() -> int:
     print(f"[collect] {len(topics)} topics saved to {TOPICS_OUT}")
     for t in topics[:5]:
         print(f"  - {t['title']}")
+
+    # 履歴に追記（次回ビルドの重複防止のため）
+    append_to_history(topics)
+    print(f"[collect] history updated: {HISTORY_PATH}")
     return 0
 
 
