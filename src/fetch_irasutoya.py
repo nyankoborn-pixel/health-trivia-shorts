@@ -64,11 +64,13 @@ def search_keyword(keyword: str) -> list[str]:
     polite_sleep()
     soup = BeautifulSoup(html, "lxml")
 
-    # 記事カードのリンク: <h2 class="title"><a href="..."> ... </a></h2>
+    # 記事カードのリンク: <div class="boxmeta clearfix"><h2><a href="..."></a></h2></div>
     article_urls: list[str] = []
-    for h2 in soup.select("h2.title a[href]"):
-        href = h2.get("href")
+    for a in soup.select("div.boxmeta.clearfix h2 a[href]"):
+        href = a.get("href")
         if href and href.startswith("https://www.irasutoya.com/") and ".html" in href:
+            if href in article_urls:
+                continue
             article_urls.append(href)
             if len(article_urls) >= MAX_FALLBACK_RESULTS:
                 break
