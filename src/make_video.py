@@ -96,13 +96,14 @@ def make_scene_clip(
     ff_img = str(Path(image_path).resolve()).replace("\\", "/")
     ff_wav = str(wav_path.resolve()).replace("\\", "/")
 
+    # 入力構成: [0:v]=image (-loop 1), [1:a]=wav (音声のみ)
     # フィルタ:
     # 1. 白背景 1920x1080 を color source で生成
-    # 2. 画像を高さ img_h にスケール（縦横比維持）、白背景中央上寄り (img_y) に overlay
-    # 3. 上部に太字黒テロップ (画面上部 8% 〜)
+    # 2. [0:v] (image) を高さ img_h にスケール（縦横比維持）、白背景中央上寄り (img_y) に overlay
+    # 3. 上部に太字黒テロップ
     filter_complex = ";".join([
         f"color=c=white:s={W}x{H}:r={FPS}[bg]",
-        f"[1:v]scale=-1:{img_h}:flags=lanczos,format=rgba[img]",
+        f"[0:v]scale=-1:{img_h}:flags=lanczos,format=rgba[img]",
         f"[bg][img]overlay=x=(W-w)/2:y={img_y}[base]",
         (
             f"[base]drawtext=fontfile='{ff_bold}':textfile='{ff_telop}':"
@@ -129,8 +130,10 @@ def make_scene_clip(
     print(f"  [scene {index}] {duration:.2f}s -> {out_path.name}")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
+        log_file = WORK_DIR / f"_ffmpeg_scene_{index:02d}.log"
+        log_file.write_text(r.stderr, encoding="utf-8")
         print(r.stderr[-3000:], file=sys.stderr)
-        raise RuntimeError(f"ffmpeg failed for scene {index}")
+        raise RuntimeError(f"ffmpeg failed for scene {index} (full log: {log_file})")
 
 
 def concat_clips(clip_paths: list[Path], out_path: Path) -> None:
