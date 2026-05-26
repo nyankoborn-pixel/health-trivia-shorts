@@ -38,35 +38,48 @@ SEED_THEMES = [
 ]
 
 
-def build_prompt() -> str:
+def build_research_prompt() -> str:
+    """Step 1: grounding で自由文ファクト収集するためのプロンプト"""
     today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
     seeds = random.sample(SEED_THEMES, k=4)
-    return f"""今日は {today} です。日本の一般視聴者向けの「健康雑学」YouTube 動画用に、以下の条件でトピック候補を {TARGET_TOPIC_COUNT} 件抽出してください。
+    return f"""今日は {today} です。日本の一般視聴者向けの「健康雑学」YouTube 動画用のネタを Google 検索で収集してください。
 
 【条件】
+- {TARGET_TOPIC_COUNT} 個の独立した雑学トピックを集める
 - 各トピックは「知っているとちょっと差がつく」レベルの健康・体・心理に関する雑学
-- 信頼できる情報源（厚生労働省、医療法人、製薬会社、大学、査読論文の解説記事、NHK、大手健康メディア）の記事を Google 検索で複数横断し、ファクトを揃える
+- 信頼できる情報源（厚生労働省、医療法人、製薬会社、大学、査読論文の解説記事、NHK、大手健康メディア）を複数横断して根拠を揃える
 - 個人ブログ・アフィリエイトサイト・断定的に治療効果を謳う記事は除外
 - 医療行為の代替や特定疾患の治療法を断定する内容は禁止
-- 今回のテーマ候補（参考）: {", ".join(seeds)}（これらに限定せず、面白い切り口があれば自由）
+- 参考テーマ（これに限らず自由に）: {", ".join(seeds)}
 
-【各トピックの粒度】
-- 30 秒の音声ナレーションで成立する分量
-- 「事実 1 〜 2 つ + その背景 + 視聴者にとっての実生活への示唆」程度
+【出力】 各トピックを以下のフォーマットで列挙してください（自由文で構いません）:
 
-【出力形式】
-JSON 配列のみ。前後の説明文・マークダウン記号は付けない。各要素は以下:
+トピック {{番号}}: 見出し（20字以内）
+本文: 150〜200 字の日本語ナレーション原稿（30 秒で話せる量）
+出典: 参照した URL を箇条書き
 
-[
-  {{
-    "title": "短い見出し（20字以内）",
-    "body": "30秒で話せる本文（150〜200字程度の日本語）",
-    "sources": ["参照した記事URL", ...]
-  }},
-  ...
-]
+トピック 2: 見出し
+...
 
-JSON配列のみを出力してください。マークダウンの ``` も付けないでください。"""
+JSON 形式は不要です。番号付きの素直なテキストで出力してください。"""
+
+
+def build_structuring_prompt(research_text: str) -> str:
+    """Step 2: 自由文の調査結果を JSON 配列に整形するためのプロンプト"""
+    return f"""以下は健康雑学の調査結果です。これを JSON 配列に整形してください。
+
+# 調査結果
+{research_text}
+
+# 出力形式
+JSON 配列のみ。各要素は以下のキーを持つオブジェクト:
+- title: 文字列（20字以内の見出し）
+- body: 文字列（150〜200字の本文）
+- sources: 文字列の配列（出典URL、無ければ空配列 []）
+
+調査結果に含まれるトピック数だけ配列要素を作ってください。
+他のキーは追加しないこと。
+"""
 
 
 def call_gemini_with_search() -> list[dict]:
@@ -76,33 +89,40 @@ def call_gemini_with_search() -> list[dict]:
 
     client = genai.Client(api_key=api_key)
 
-    prompt = build_prompt()
-    print(f"[collect] requesting {TARGET_TOPIC_COUNT} topics from {MODEL} with google_search")
-    response = client.models.generate_content(
+    # === Step 1: grounding で自由文ファクト収集 ===
+    print(f"[collect] step1: research with {MODEL} + google_search")
+    research = client.models.generate_content(
         model=MODEL,
-        contents=prompt,
+        contents=build_research_prompt(),
         config=types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
             temperature=0.85,
-            max_output_tokens=4096,
+            max_output_tokens=8192,
         ),
     )
+    research_text = (research.text or "").strip()
+    (WORK_DIR / "_collect_raw.txt").write_text(research_text, encoding="utf-8")
+    if not research_text:
+        raise RuntimeError("Step 1 grounding returned empty (safety filter?)")
+    print(f"[collect] step1 done: {len(research_text)} chars of research")
 
-    text = (response.text or "").strip()
-    # デバッグ用に生レスポンスを保存（失敗時に確認できるよう）
-    (WORK_DIR / "_collect_raw.txt").write_text(text, encoding="utf-8")
-    if not text:
-        raise RuntimeError("Gemini returned empty response (grounding/safety filter blocked?)")
+    # === Step 2: JSON モードで構造化（grounding なし、温度低め）===
+    print(f"[collect] step2: structuring to JSON")
+    structured = client.models.generate_content(
+        model=MODEL,
+        contents=build_structuring_prompt(research_text),
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.2,
+            max_output_tokens=8192,
+        ),
+    )
+    json_text = (structured.text or "").strip()
+    (WORK_DIR / "_collect_json.txt").write_text(json_text, encoding="utf-8")
+    if not json_text:
+        raise RuntimeError("Step 2 JSON structuring returned empty")
 
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```\s*$", "", text)
-
-    # 先頭から [ ... ] を抽出（前置きが入った場合の保険）
-    m = re.search(r"\[\s*\{.*\}\s*\]", text, re.DOTALL)
-    if m:
-        text = m.group(0)
-
-    topics = _safe_json_loads(text)
+    topics = _safe_json_loads(json_text)
     if not isinstance(topics, list):
         raise RuntimeError(f"expected list, got {type(topics)}")
     return topics
