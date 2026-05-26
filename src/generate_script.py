@@ -27,50 +27,31 @@ SCRIPT_OUT = WORK_DIR / "script.json"
 
 MODEL = "gemini-2.5-flash"
 
-DISCLAIMER_SCENE = {
-    "id": "disclaimer",
-    "text": "本動画は一般的な健康雑学です。医療行為を代替するものではありません。体調にご不安のある方は、医療機関にご相談ください。",
-    "subtitles": [
-        {"text": "本動画は一般的な", "important": False},
-        {"text": "健康雑学です", "important": False},
-        {"text": "医療行為を代替する", "important": True},
-        {"text": "ものではありません", "important": False},
-        {"text": "体調にご不安の方は", "important": False},
-        {"text": "医療機関にご相談を", "important": True},
-    ],
-    "image_keywords": ["問診", "医者", "医療相談"],
-}
-
-# 動画シーンが万一描画されなくても YouTube 説明欄で免責が届くよう、
-# description 先頭に必ず付与する定型文。
+# YouTube 説明欄先頭に付与する一般注意書き。健康以外の話題も扱うので汎用文言。
 DISCLAIMER_DESC_PREFIX = (
-    "※本動画は一般的な健康雑学であり、医療行為を代替するものではありません。"
-    "体調にご不安のある方は医療機関にご相談ください。\n\n"
+    "※本動画は一般的な情報の紹介です。"
+    "健康・医療に関する内容については、専門家にご相談ください。\n\n"
 )
 
-SYSTEM_PROMPT = """あなたは健康雑学 YouTube 動画の台本生成 AI です。
-日本の一般視聴者向けに、与えられたトピック候補から 5〜6 個を選び、各 30 秒前後で話せるシーン台本を作成してください。
+SYSTEM_PROMPT = """あなたは中高年向け雑学 YouTube 動画の台本生成 AI です。
+日本の中高年視聴者向けに、与えられたトピック候補から 5〜6 個を選び、各 30 秒前後で話せるシーン台本を作成してください。
+
+【テーマの範囲】
+健康、生活、食、習慣、知恵、文化、歴史、季節、ランキングなど中高年が興味を持ちそうな雑学。健康トピックばかりに偏らず、幅広く採用する。
 
 【厳守事項】
 1. 与えられたトピックの body に書かれた事実のみ使用し、新しい事実・数字・固有名詞を捏造しないこと
-2. 医療行為の代替や特定疾患の治療効果を断定しない。「〜と言われています」「〜の可能性があります」など断定を避ける表現を使う
+2. 健康・医療系の話題では「〜と言われています」「〜の可能性があります」など断定を避ける表現を使う。治療効果の断定は禁止
 3. ナレーション (text) は 130〜170 字。subtitles は text を分割した字幕配列
 4. 各シーンは独立して理解できる単発雑学として完結させる
 5. 「9 割の人が知らない」のような煽り見出しは避け、落ち着いた知的トーン
 
 【字幕 (subtitles) の作り方】★最重要★
-- text を「、」「。」や意味の区切りで自然に分割したオブジェクト配列
-- 各要素は `{"text": "字幕本文", "important": true/false}` 形式
-- text フィールドは **14 字以内**（必ず守る。15 字以上は禁止）
-- important: そのシーンの結論や数字・意外性が含まれる字幕は true（強調表示）。1 シーン 8〜12 個のうち 2〜3 個程度を true
-- 連結すると元の text と同じ内容になるよう構成
+- text を「、」「。」や意味の区切りで自然に分割した文字列配列
+- **各要素は 14 字以内**（必ず守る。15 字以上は禁止）
+- 連結すると text と同じ内容になるよう構成
 - 例: text="朝日を浴びると体内時計がリセットされ、夜の睡眠の質が高まると言われています。"
-  → subtitles=[
-      {"text": "朝日を浴びると", "important": false},
-      {"text": "体内時計がリセットされ", "important": true},
-      {"text": "夜の睡眠の質が高まると", "important": true},
-      {"text": "言われています", "important": false}
-    ]
+  → subtitles=["朝日を浴びると", "体内時計がリセットされ", "夜の睡眠の質が高まると", "言われています"]
 - 1 シーン = 8〜12 個の subtitles 程度
 
 【画像検索キーワード (image_keywords)】
@@ -89,11 +70,7 @@ SYSTEM_PROMPT = """あなたは健康雑学 YouTube 動画の台本生成 AI で
     {
       "id": "01_intro",
       "text": "ナレーション本文（130〜170字、句点付き）",
-      "subtitles": [
-        {"text": "14字以内の字幕1", "important": false},
-        {"text": "14字以内の字幕2", "important": true},
-        "...8〜12個"
-      ],
+      "subtitles": ["14字以内の字幕1", "14字以内の字幕2", "...8〜12個"],
       "image_keywords": ["キーワード1", "キーワード2", "キーワード3"]
     },
     ...
@@ -171,40 +148,36 @@ def generate_script(topics: list[dict]) -> dict:
     return parsed
 
 
-def _split_text_to_subtitles(text: str, max_len: int = 14) -> list[dict]:
+def _split_text_to_subtitles(text: str, max_len: int = 14) -> list[str]:
     """text を句読点 (、 。) で区切り、max_len 字以内のチャンクに自動分割。
-    subtitles が欠落していた時のフォールバック用。全て important=False で返す。
+    subtitles が欠落していた時のフォールバック用。
     """
     import re as _re
     pieces = [p for p in _re.split(r"([、。])", text) if p]
-    # 区切り文字を直前のピースに付け戻す
     merged: list[str] = []
     for p in pieces:
         if p in ("、", "。") and merged:
             merged[-1] += p
         else:
             merged.append(p)
-    # max_len 超過のチャンクをさらに細かく割る
-    out: list[dict] = []
+    out: list[str] = []
     for chunk in merged:
         while len(chunk) > max_len:
-            out.append({"text": chunk[:max_len], "important": False})
+            out.append(chunk[:max_len])
             chunk = chunk[max_len:]
         if chunk:
-            out.append({"text": chunk, "important": False})
+            out.append(chunk)
     return out
 
 
-def _normalize_subtitles(subs: list) -> list[dict]:
-    """字幕配列を [{text, important}] 形式に統一する。
-    LLM が文字列配列で返してきた場合や dict 形式の場合の両方に対応。
-    """
-    out: list[dict] = []
+def _normalize_subtitles(subs: list) -> list[str]:
+    """字幕配列を文字列配列に統一する。dict が来た場合は text フィールドを取り出す。"""
+    out: list[str] = []
     for s in subs:
         if isinstance(s, str):
-            out.append({"text": s, "important": False})
-        elif isinstance(s, dict) and "text" in s and isinstance(s["text"], str):
-            out.append({"text": s["text"], "important": bool(s.get("important", False))})
+            out.append(s)
+        elif isinstance(s, dict) and isinstance(s.get("text"), str):
+            out.append(s["text"])
         else:
             raise RuntimeError(f"invalid subtitle entry: {s!r}")
     return out
@@ -230,29 +203,28 @@ def validate_script(script: dict) -> dict:
         if not isinstance(subs, list) or len(subs) == 0:
             print(f"  [warn] scene {i} missing subtitles, deriving from text")
             subs = _split_text_to_subtitles(s["text"], max_len=14)
-        # dict 形式に正規化
         subs = _normalize_subtitles(subs)
         s["subtitles"] = subs
 
-        # 各 subtitle の長さチェック（>16 字は警告のみ、make_video 側で折返なしで描画）
+        # 各 subtitle の長さチェック（>16 字は警告のみ）
         for j, sub in enumerate(subs):
-            if not sub["text"].strip():
-                raise RuntimeError(f"scene {i} subtitle[{j}] empty text")
-            if len(sub["text"]) > 16:
-                print(f"  [warn] scene {i} subtitle[{j}] too long ({len(sub['text'])}字): {sub['text']}")
+            if not sub.strip():
+                raise RuntimeError(f"scene {i} subtitle[{j}] empty")
+            if len(sub) > 16:
+                print(f"  [warn] scene {i} subtitle[{j}] too long ({len(sub)}字): {sub}")
 
         for word in forbidden:
             if word in s["text"]:
                 raise RuntimeError(f"scene {i} text contains forbidden word '{word}'")
             for sub in subs:
-                if word in sub["text"]:
+                if word in sub:
                     raise RuntimeError(f"scene {i} subtitle contains forbidden word '{word}'")
 
         # image_keywords が無い/空なら subtitles[0] から推測
         kws = s.get("image_keywords")
         if not isinstance(kws, list) or len(kws) == 0:
             print(f"  [warn] scene {i} missing image_keywords, deriving from subtitles[0]")
-            s["image_keywords"] = [subs[0]["text"][:6]]
+            s["image_keywords"] = [subs[0][:6]]
 
     for field in ("title", "description"):
         if field in script:
@@ -263,11 +235,10 @@ def validate_script(script: dict) -> dict:
     return script
 
 
-def append_disclaimer(script: dict) -> dict:
-    """動画末尾のシーンと、YouTube 説明欄先頭の両方に免責文言を付与する。
-    動画側が画像取得失敗等で skip されても説明欄で必ず免責が届くようにする保険。
+def prepend_description_disclaimer(script: dict) -> dict:
+    """YouTube 説明欄先頭に一般注意書きを付与する。
+    本編シーンには追加しない（概要欄記載で十分・Boss 指示）。
     """
-    script["scenes"].append(DISCLAIMER_SCENE)
     existing_desc = script.get("description", "")
     script["description"] = DISCLAIMER_DESC_PREFIX + existing_desc
     return script
@@ -281,14 +252,14 @@ def main() -> int:
     topics = json.loads(TOPICS_IN.read_text(encoding="utf-8"))
     script = generate_script(topics)
     script = validate_script(script)
-    script = append_disclaimer(script)
+    script = prepend_description_disclaimer(script)
 
     SCRIPT_OUT.write_text(
         json.dumps(script, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     print(f"[script] title: {script['title']}")
-    print(f"[script] scenes: {len(script['scenes'])} (incl. disclaimer)")
+    print(f"[script] scenes: {len(script['scenes'])}")
     print(f"[script] saved: {SCRIPT_OUT}")
     return 0
 
