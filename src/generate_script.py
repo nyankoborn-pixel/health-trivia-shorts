@@ -1,0 +1,163 @@
+"""
+generate_script.py
+
+work/topics.json からトピック候補を読み、Claude API で 5-6 シーン × 30 秒の台本を生成する。
+各シーンには「ナレーション本文 (text)」「画面に焼き込むテロップ (telop)」「いらすとや検索キーワード (image_keywords)」を含める。
+
+末尾シーンに医療免責定型文を必ず付与する。
+
+出力: work/script.json
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+import anthropic
+
+WORK_DIR = Path("work")
+TOPICS_IN = WORK_DIR / "topics.json"
+SCRIPT_OUT = WORK_DIR / "script.json"
+
+MODEL = "claude-opus-4-5"
+
+# 末尾に必ず追加する医療免責シーン。LLM 生成と分離して定型化することで規約遵守を確実にする
+DISCLAIMER_SCENE = {
+    "id": "disclaimer",
+    "text": "本動画は一般的な健康雑学です。医療行為を代替するものではありません。体調にご不安のある方は医療機関にご相談ください。",
+    "telop": "医療機関にご相談ください",
+    "image_keywords": ["医療機関", "医師", "相談"],
+}
+
+SYSTEM_PROMPT = """あなたは健康雑学 YouTube 動画の台本生成 AI です。
+日本の一般視聴者向けに、与えられたトピック候補から 5〜6 個を選び、各 30 秒前後で話せるシーン台本を作成してください。
+
+【厳守事項】
+1. 与えられたトピックの body に書かれた事実のみ使用し、新しい事実・数字・固有名詞を捏造しないこと
+2. 医療行為の代替や特定疾患の治療効果を断定しない。「〜と言われています」「〜の可能性があります」など断定を避ける表現を使う
+3. 1 シーンのテロップ (telop) は 20 字以内、ナレーション (text) は 130〜170 字
+4. 各シーンは独立して理解できる単発雑学として完結させる
+5. 「9 割の人が知らない」のような煽り見出しは避け、落ち着いた知的トーン
+
+【画像検索キーワード (image_keywords)】
+各シーンの内容に合う「いらすとや」検索ワードを 2〜3 個列挙する。
+- 抽象語より具体語を優先（「健康」より「体温計」「ジョギング」「リンゴ」など）
+- いらすとやで実際に画像が存在しそうな語にする（イメージしやすい人物・物体・行動）
+
+【冒頭フック】
+1 シーン目は「実は、〜」「あなたは〜していませんか?」のような視聴者に語りかける問いかけ or 意外な事実で始める。
+
+【出力形式】 JSON のみ。前後に説明文・マークダウンを付けない。
+{
+  "title": "55 文字以内の動画タイトル",
+  "description": "YouTube 説明欄用、3〜5 行の文章。素材出典は記載しない",
+  "scenes": [
+    {
+      "id": "01_intro",
+      "text": "ナレーション本文（130〜170字）",
+      "telop": "上部テロップ（20字以内）",
+      "image_keywords": ["キーワード1", "キーワード2", "キーワード3"]
+    },
+    ...
+  ]
+}
+
+【注意】「いらすとや」「irasutoya」という単語を title/description/text/telop のいずれにも含めないこと（コラボ誤解を避けるため）。"""
+
+
+def build_user_prompt(topics: list[dict]) -> str:
+    topics_block = "\n\n".join(
+        f"【候補 {i+1}】\nタイトル: {t['title']}\n本文: {t['body']}"
+        for i, t in enumerate(topics)
+    )
+    return f"""以下のトピック候補から 5〜6 個を選び、台本 JSON を生成してください。
+
+{topics_block}
+
+選定基準: 視聴者の興味を引き、画像で表現しやすく、医療誤情報リスクの低いもの。
+"""
+
+
+def generate_script(topics: list[dict]) -> dict:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    print(f"[script] generating with {len(topics)} candidate topics")
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=4096,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": build_user_prompt(topics)}],
+    )
+
+    text_blocks = [b.text for b in message.content if getattr(b, "type", None) == "text"]
+    raw = text_blocks[-1].strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+        raw = raw.rsplit("```", 1)[0].strip()
+
+    return json.loads(raw)
+
+
+def validate_script(script: dict) -> dict:
+    if "title" not in script or "scenes" not in script:
+        raise RuntimeError(f"missing required fields: {list(script.keys())}")
+
+    scenes = script["scenes"]
+    if not isinstance(scenes, list) or not 4 <= len(scenes) <= 7:
+        raise RuntimeError(f"scenes must be a list of 4-7 items, got {len(scenes)}")
+
+    forbidden = ("いらすとや", "irasutoya", "イラストや")
+    for i, s in enumerate(scenes):
+        for k in ("text", "telop", "image_keywords"):
+            if k not in s:
+                raise RuntimeError(f"scene {i} missing '{k}': {s}")
+        s.setdefault("id", f"{i+1:02d}")
+        for field in ("text", "telop"):
+            for word in forbidden:
+                if word in s[field]:
+                    raise RuntimeError(f"scene {i} {field} contains forbidden word '{word}'")
+        if not isinstance(s["image_keywords"], list) or len(s["image_keywords"]) == 0:
+            raise RuntimeError(f"scene {i} image_keywords must be a non-empty list")
+
+    for field in ("title", "description"):
+        if field in script:
+            for word in forbidden:
+                if word in script[field]:
+                    raise RuntimeError(f"{field} contains forbidden word '{word}'")
+
+    return script
+
+
+def append_disclaimer(script: dict) -> dict:
+    script["scenes"].append(DISCLAIMER_SCENE)
+    return script
+
+
+def main() -> int:
+    if not TOPICS_IN.exists():
+        print(f"ERROR: {TOPICS_IN} not found. Run collect_topics.py first.", file=sys.stderr)
+        return 1
+
+    topics = json.loads(TOPICS_IN.read_text(encoding="utf-8"))
+    script = generate_script(topics)
+    script = validate_script(script)
+    script = append_disclaimer(script)
+
+    SCRIPT_OUT.write_text(
+        json.dumps(script, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"[script] title: {script['title']}")
+    print(f"[script] scenes: {len(script['scenes'])} (incl. disclaimer)")
+    print(f"[script] saved: {SCRIPT_OUT}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

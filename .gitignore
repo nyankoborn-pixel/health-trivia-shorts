@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Outputs and intermediates (gitignored per project rule)
+output/
+work/
+cache/
+tmp/
+
+# Secrets
+.env
+.env.local
+*.token
+client_secret*.json
+cookies.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+logs/*.jsonl

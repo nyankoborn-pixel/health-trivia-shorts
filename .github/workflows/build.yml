@@ -1,0 +1,75 @@
+name: Build health trivia video
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 毎日 22:00 JST = 13:00 UTC に自動生成
+    - cron: "0 13 * * *"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    services:
+      voicevox:
+        image: voicevox/voicevox_engine:cpu-latest
+        ports:
+          - 50021:50021
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install ffmpeg + fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-cjk
+
+      - name: Wait for VOICEVOX
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:50021/version > /dev/null; then
+              echo "VOICEVOX ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "VOICEVOX timeout" >&2
+          exit 1
+
+      - name: Build video
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          VOICEVOX_URL: http://localhost:50021
+        run: python -m src.build
+
+      - name: Upload output artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: health-trivia-${{ github.run_number }}
+          path: |
+            output/*.mp4
+            output/*.jpg
+            output/*.json
+          retention-days: 7
+
+      - name: Upload work intermediates on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: work-debug-${{ github.run_number }}
+          path: work/
+          retention-days: 3
