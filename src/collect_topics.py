@@ -28,7 +28,7 @@ WORK_DIR = Path("work")
 WORK_DIR.mkdir(exist_ok=True)
 TOPICS_OUT = WORK_DIR / "topics.json"
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-2.0-flash"
 
 TARGET_TOPIC_COUNT = 7
 
