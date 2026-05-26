@@ -104,46 +104,66 @@ def generate_script(topics: list[dict]) -> dict:
             response_mime_type="application/json",
             temperature=0.7,
             top_p=0.95,
-            max_output_tokens=4096,
+            max_output_tokens=8192,
         ),
     )
 
     text = (response.text or "").strip()
     (WORK_DIR / "_script_raw.txt").write_text(text, encoding="utf-8")
+    print(f"[script] response: {len(text)} chars")
+    if not text:
+        # safety filter / blocked / quota 切れ等
+        try:
+            cand = response.candidates[0] if response.candidates else None
+            finish = getattr(cand, "finish_reason", "unknown") if cand else "no-candidate"
+        except Exception:
+            finish = "unknown"
+        raise RuntimeError(f"Gemini returned empty response for script (finish_reason={finish})")
 
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)
 
     try:
-        return json.loads(text, strict=False)
+        parsed = json.loads(text, strict=False)
     except json.JSONDecodeError:
         sanitized = "".join(
             " " if (ord(c) < 32 and c not in "\t\n\r") else c
             for c in text
         )
-        return json.loads(sanitized, strict=False)
+        parsed = json.loads(sanitized, strict=False)
+
+    # validate 前にパース結果を dump（validate でこけた時に中身を確認できる）
+    (WORK_DIR / "_script_parsed.json").write_text(
+        json.dumps(parsed, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return parsed
 
 
 def validate_script(script: dict) -> dict:
     if "title" not in script or "scenes" not in script:
-        raise RuntimeError(f"missing required fields: {list(script.keys())}")
+        raise RuntimeError(f"missing required fields: keys={list(script.keys())}")
 
     scenes = script["scenes"]
-    if not isinstance(scenes, list) or not 4 <= len(scenes) <= 7:
-        raise RuntimeError(f"scenes must be a list of 4-7 items, got {len(scenes)}")
+    if not isinstance(scenes, list) or not 3 <= len(scenes) <= 8:
+        raise RuntimeError(f"scenes must be a list of 3-8 items, got {len(scenes) if isinstance(scenes, list) else type(scenes)}")
 
     forbidden = ("いらすとや", "irasutoya", "イラストや")
     for i, s in enumerate(scenes):
-        for k in ("text", "telop", "image_keywords"):
+        # 必須キーチェック。image_keywords は欠落時に telop から自動補完できるので緩める
+        for k in ("text", "telop"):
             if k not in s:
-                raise RuntimeError(f"scene {i} missing '{k}': {s}")
+                raise RuntimeError(f"scene {i} missing '{k}': scene_keys={list(s.keys())}")
         s.setdefault("id", f"{i+1:02d}")
         for field in ("text", "telop"):
             for word in forbidden:
                 if word in s[field]:
                     raise RuntimeError(f"scene {i} {field} contains forbidden word '{word}'")
-        if not isinstance(s["image_keywords"], list) or len(s["image_keywords"]) == 0:
-            raise RuntimeError(f"scene {i} image_keywords must be a non-empty list")
+        # image_keywords が無い/空なら telop から推測（モデルが時々忘れる）
+        kws = s.get("image_keywords")
+        if not isinstance(kws, list) or len(kws) == 0:
+            print(f"  [warn] scene {i} missing image_keywords, deriving from telop")
+            s["image_keywords"] = [s["telop"][:6]]
 
     for field in ("title", "description"):
         if field in script:
