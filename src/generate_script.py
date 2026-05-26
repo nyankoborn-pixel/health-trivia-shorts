@@ -102,10 +102,19 @@ def generate_script(topics: list[dict]) -> dict:
     )
 
     text = (response.text or "").strip()
+    (WORK_DIR / "_script_raw.txt").write_text(text, encoding="utf-8")
+
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)
 
-    return json.loads(text)
+    try:
+        return json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        sanitized = "".join(
+            " " if (ord(c) < 32 and c not in "\t\n\r") else c
+            for c in text
+        )
+        return json.loads(sanitized, strict=False)
 
 
 def validate_script(script: dict) -> dict:

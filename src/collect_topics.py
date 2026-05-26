@@ -89,6 +89,9 @@ def call_gemini_with_search() -> list[dict]:
     )
 
     text = (response.text or "").strip()
+    # デバッグ用に生レスポンスを保存（失敗時に確認できるよう）
+    (WORK_DIR / "_collect_raw.txt").write_text(text, encoding="utf-8")
+
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)
 
@@ -97,10 +100,26 @@ def call_gemini_with_search() -> list[dict]:
     if m:
         text = m.group(0)
 
-    topics = json.loads(text)
+    topics = _safe_json_loads(text)
     if not isinstance(topics, list):
         raise RuntimeError(f"expected list, got {type(topics)}")
     return topics
+
+
+def _safe_json_loads(text: str):
+    """grounding 出力に混入しがちな制御文字 (BEL, BS, 等) を許容して JSON パースする。
+
+    まず strict=False で試し（\t \n \r を文字列内に許可）、それでも落ちるなら
+    印字不可な ASCII 制御文字 (0-31 のうち \t \n \r 以外) を空白に置換して再試行する。
+    """
+    try:
+        return json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        sanitized = "".join(
+            " " if (ord(c) < 32 and c not in "\t\n\r") else c
+            for c in text
+        )
+        return json.loads(sanitized, strict=False)
 
 
 def validate_topics(topics: list[dict]) -> list[dict]:
