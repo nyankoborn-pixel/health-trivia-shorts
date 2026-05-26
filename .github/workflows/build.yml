@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write   # topic_history.jsonl を push し戻すため
+      contents: write   # Release 作成と topic_history.jsonl の commit に必要
 
     services:
       voicevox:
@@ -55,49 +55,59 @@ jobs:
           VOICEVOX_URL: http://localhost:50021
         run: python -m src.build
 
-      # === OneDrive 自動アップロード ===
-      # 事前に GH Secret `RCLONE_CONF` に rclone.conf の中身（OneDrive remote 設定済み）を
-      # 登録しておくこと。未登録の場合はこの step は skip し、フォールバックの artifact が残る。
-      - name: Setup rclone (if RCLONE_CONF is set)
-        id: rclone_setup
+      # === 成果物を GitHub Release に保存（恒久保存） ===
+      - name: Prepare release info
+        id: rel_info
         if: success()
-        env:
-          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
-        run: |
-          if [ -z "$RCLONE_CONF" ]; then
-            echo "rclone_ready=false" >> $GITHUB_OUTPUT
-            echo "::notice::RCLONE_CONF secret not set; skipping OneDrive upload (artifact fallback used)"
-            exit 0
-          fi
-          curl -s https://rclone.org/install.sh | sudo bash > /dev/null
-          mkdir -p ~/.config/rclone
-          printf '%s' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
-          rclone listremotes
-          echo "rclone_ready=true" >> $GITHUB_OUTPUT
-
-      - name: Upload output to OneDrive
-        id: cloud_upload
-        if: success() && steps.rclone_setup.outputs.rclone_ready == 'true'
         run: |
           DATE=$(TZ=Asia/Tokyo date +%Y-%m-%d)
-          RUN=${{ github.run_number }}
-          rclone copy output/ "onedrive:health-trivia-shorts/${DATE}/run-${RUN}/" --progress
-          echo "uploaded=true" >> $GITHUB_OUTPUT
-          echo "::notice::Uploaded to OneDrive: health-trivia-shorts/${DATE}/run-${RUN}/"
+          TIME=$(TZ=Asia/Tokyo date +%H%M)
+          echo "tag=build-${{ github.run_number }}-${DATE}" >> $GITHUB_OUTPUT
+          echo "name=${DATE} #${{ github.run_number }}" >> $GITHUB_OUTPUT
+          echo "date_jst=${DATE} ${TIME} JST" >> $GITHUB_OUTPUT
 
-      # === GitHub 側 artifact フォールバック ===
-      # OneDrive アップロードが成功した場合は不要なので skip。失敗時 or rclone 未設定時のみ保存。
-      - name: Upload output artifact (fallback)
-        if: always() && (steps.cloud_upload.outputs.uploaded != 'true')
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release with assets
+        if: success()
+        uses: softprops/action-gh-release@v2
         with:
-          name: health-trivia-${{ github.run_number }}
-          path: |
+          tag_name: ${{ steps.rel_info.outputs.tag }}
+          name: ${{ steps.rel_info.outputs.name }}
+          body: |
+            自動生成された中高年向け雑学動画。
+            生成日時: ${{ steps.rel_info.outputs.date_jst }}
+            Run: #${{ github.run_number }}
+
+            Assets:
+            - `*.mp4` 動画本体（YouTube 投稿用）
+            - `*_thumb.jpg` サムネイル
+            - `*.json` メタ情報（タイトル・説明文）
+          files: |
             output/*.mp4
             output/*.jpg
             output/*.json
-          retention-days: 2
+          make_latest: true
 
+      # === 30 日より古い Release を自動削除 ===
+      - name: Cleanup old releases (>30 days)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          # 30 日前の日付（ISO8601）
+          cutoff=$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          echo "Deleting releases created before: $cutoff"
+          # gh CLI は ubuntu-latest に標準インストール済み
+          gh release list --limit 200 --json tagName,createdAt > /tmp/releases.json
+          jq -r --arg cutoff "$cutoff" \
+            '.[] | select(.createdAt < $cutoff) | .tagName' /tmp/releases.json | \
+          while read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "  deleting: $tag"
+            gh release delete "$tag" --cleanup-tag --yes || true
+          done
+
+      # === 失敗時のみ work/ を debug artifact として残す ===
       - name: Upload work intermediates on failure
         if: failure()
         uses: actions/upload-artifact@v4
