@@ -40,7 +40,7 @@ SCRIPT_IN = WORK_DIR / "script.json"
 IMAGES_OUT = WORK_DIR / "images.json"
 
 SEARCH_URL = "https://www.irasutoya.com/search?q={q}"
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 pv-consul-health-trivia"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 health-trivia-shorts"
 SLEEP_BETWEEN_REQUESTS = 2.0  # サイト配慮: 同期処理で 2 秒以上空ける
 MAX_FALLBACK_RESULTS = 3      # 検索ページから最大 3 件を候補として保持
 

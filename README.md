@@ -1,4 +1,4 @@
-# pv-consul-health-trivia
+# health-trivia-shorts
 
 健康雑学 YouTube 動画を毎日 1 本自動生成するパイプライン。投稿は手動。
 
