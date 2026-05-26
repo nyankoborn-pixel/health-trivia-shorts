@@ -29,8 +29,15 @@ DISCLAIMER_SCENE = {
     "id": "disclaimer",
     "text": "本動画は一般的な健康雑学です。医療行為を代替するものではありません。体調にご不安のある方は医療機関にご相談ください。",
     "telop": "医療機関にご相談ください",
-    "image_keywords": ["医療機関", "医師", "相談"],
+    "image_keywords": ["問診", "医者", "医療相談"],
 }
+
+# 動画シーンが万一描画されなくても YouTube 説明欄で免責が届くよう、
+# description 先頭に必ず付与する定型文。
+DISCLAIMER_DESC_PREFIX = (
+    "※本動画は一般的な健康雑学であり、医療行為を代替するものではありません。"
+    "体調にご不安のある方は医療機関にご相談ください。\n\n"
+)
 
 SYSTEM_PROMPT = """あなたは健康雑学 YouTube 動画の台本生成 AI です。
 日本の一般視聴者向けに、与えられたトピック候補から 5〜6 個を選び、各 30 秒前後で話せるシーン台本を作成してください。
@@ -148,7 +155,12 @@ def validate_script(script: dict) -> dict:
 
 
 def append_disclaimer(script: dict) -> dict:
+    """動画末尾のシーンと、YouTube 説明欄先頭の両方に免責文言を付与する。
+    動画側が画像取得失敗等で skip されても説明欄で必ず免責が届くようにする保険。
+    """
     script["scenes"].append(DISCLAIMER_SCENE)
+    existing_desc = script.get("description", "")
+    script["description"] = DISCLAIMER_DESC_PREFIX + existing_desc
     return script
 
 

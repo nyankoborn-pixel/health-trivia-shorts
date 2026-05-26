@@ -22,7 +22,7 @@ AUDIO_INFO_OUT = WORK_DIR / "audio.json"
 
 VOICEVOX_URL = os.environ.get("VOICEVOX_URL", "http://localhost:50021")
 SPEAKER_ID = int(os.environ.get("VOICEVOX_SPEAKER_ID", "13"))  # 青山龍星 ノーマル
-SPEED_SCALE = float(os.environ.get("VOICEVOX_SPEED", "1.05"))
+SPEED_SCALE = float(os.environ.get("VOICEVOX_SPEED", "1.0"))
 
 
 def synth_one(text: str, out_path: Path) -> float:

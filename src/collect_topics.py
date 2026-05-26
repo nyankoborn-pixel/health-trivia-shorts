@@ -91,6 +91,8 @@ def call_gemini_with_search() -> list[dict]:
     text = (response.text or "").strip()
     # デバッグ用に生レスポンスを保存（失敗時に確認できるよう）
     (WORK_DIR / "_collect_raw.txt").write_text(text, encoding="utf-8")
+    if not text:
+        raise RuntimeError("Gemini returned empty response (grounding/safety filter blocked?)")
 
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)

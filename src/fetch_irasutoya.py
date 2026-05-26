@@ -44,6 +44,13 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 SLEEP_BETWEEN_REQUESTS = 2.0  # サイト配慮: 同期処理で 2 秒以上空ける
 MAX_FALLBACK_RESULTS = 3      # 検索ページから最大 3 件を候補として保持
 
+# disclaimer シーンが画像取得に失敗した場合の最終保険。compliance critical なシーンが
+# silent skip されないよう、リポに同梱した固定イラストへフォールバックする。
+DISCLAIMER_FALLBACK = Path("assets/fallback/disclaimer.png")
+
+# PNG / JPEG マジックバイト。404 HTML を画像として保存してしまうのを防ぐ
+_IMG_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")
+
 
 def polite_sleep():
     time.sleep(SLEEP_BETWEEN_REQUESTS + random.uniform(0, 0.5))
@@ -106,24 +113,46 @@ def cache_path_for(image_url: str) -> Path:
     return CACHE_DIR / f"{h}{ext}"
 
 
-def download_image(image_url: str) -> Path:
-    """画像をキャッシュへダウンロード（既にあればスキップ）"""
+def download_image(image_url: str) -> Path | None:
+    """画像をキャッシュへダウンロード（既にあればスキップ）。
+
+    マジックバイトで PNG / JPEG であることを確認。
+    HTML 404 ページなど画像でないレスポンスは捨てて None を返す。
+    """
     p = cache_path_for(image_url)
     if p.exists() and p.stat().st_size > 0:
         return p
     print(f"  [dl] {image_url}")
     r = requests.get(image_url, headers={"User-Agent": USER_AGENT}, timeout=30)
     r.raise_for_status()
-    p.write_bytes(r.content)
+    data = r.content
+    if not any(data.startswith(m) for m in _IMG_MAGIC):
+        print(f"  [skip] not an image (first 8 bytes: {data[:8]!r})")
+        polite_sleep()
+        return None
+    p.write_bytes(data)
     polite_sleep()
     return p
 
 
+def _try_articles(article_urls: list[str]) -> Path | None:
+    """検索結果の記事 URL 群を順に試し、最初に画像が取れたものを返す。"""
+    for url in article_urls:
+        image_url = extract_image_url(url)
+        if not image_url:
+            continue
+        img = download_image(image_url)
+        if img is not None:
+            return img
+    return None
+
+
 def find_image_for_keywords(keywords: list[str]) -> Path | None:
     """キーワード列を順に試し、最初にヒットした画像をダウンロードして返す。
+    各キーワードについて、検索上位 MAX_FALLBACK_RESULTS 件全てを試す。
     全て 0 件なら、各キーワードを 2 文字以上含む短縮版で再検索する。
     """
-    tried = []
+    tried: list[str] = []
     for kw in keywords:
         kw = kw.strip()
         if not kw or kw in tried:
@@ -133,10 +162,9 @@ def find_image_for_keywords(keywords: list[str]) -> Path | None:
         if not article_urls:
             print(f"  [miss] no result for '{kw}'")
             continue
-        # 最初の記事から画像を取る
-        image_url = extract_image_url(article_urls[0])
-        if image_url:
-            return download_image(image_url)
+        img = _try_articles(article_urls)
+        if img is not None:
+            return img
 
     # フォールバック: より短いキーワードで再検索
     for kw in keywords:
@@ -148,9 +176,9 @@ def find_image_for_keywords(keywords: list[str]) -> Path | None:
             print(f"  [fallback] retry with shorter keyword '{short}'")
             article_urls = search_keyword(short)
             if article_urls:
-                image_url = extract_image_url(article_urls[0])
-                if image_url:
-                    return download_image(image_url)
+                img = _try_articles(article_urls)
+                if img is not None:
+                    return img
 
     return None
 
@@ -172,9 +200,15 @@ def main() -> int:
         print(f"\n[scene {sid}] keywords: {kws}")
         img_path = find_image_for_keywords(kws)
         if img_path is None:
-            print(f"  [WARN] no image found for scene {sid}")
-            missing.append(sid)
-            continue
+            # disclaimer シーンは compliance critical なので必ず描画する。
+            # リポ同梱の固定イラストにフォールバック。
+            if sid == "disclaimer" and DISCLAIMER_FALLBACK.exists():
+                print(f"  [fallback] using bundled disclaimer image: {DISCLAIMER_FALLBACK}")
+                img_path = DISCLAIMER_FALLBACK
+            else:
+                print(f"  [WARN] no image found for scene {sid}")
+                missing.append(sid)
+                continue
         # シーン用に images_dir へコピー（同じ画像でも上書きで使い回す）
         ext = img_path.suffix
         dst = IMAGES_DIR / f"scene_{i:02d}{ext}"

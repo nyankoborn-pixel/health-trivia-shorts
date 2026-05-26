@@ -29,7 +29,7 @@ AUDIO_INFO_IN = WORK_DIR / "audio.json"
 IMAGES_INFO_IN = WORK_DIR / "images.json"
 
 BGM_PATH = Path("assets/bgm/Escort.mp3")
-BGM_VOLUME_DB = -16  # ナレーション基準で -16dB（雑学チャンネル想定の控えめ）
+BGM_VOLUME_DB = -20  # ナレーション基準で -20dB（参考動画相当の控えめ）
 
 W, H = 1920, 1080
 FPS = 30
@@ -106,9 +106,9 @@ def make_scene_clip(
         f"[bg][img]overlay=x=(W-w)/2:y={img_y}[base]",
         (
             f"[base]drawtext=fontfile='{ff_bold}':textfile='{ff_telop}':"
-            f"fontcolor=black:fontsize=80:"
-            f"x=(w-text_w)/2:y={int(H * 0.05)}:"
-            f"line_spacing=14:borderw=2:bordercolor=white[v]"
+            f"fontcolor=black:fontsize=96:"
+            f"x=(w-text_w)/2:y={int(H * 0.04)}:"
+            f"line_spacing=16:borderw=2:bordercolor=white[v]"
         ),
     ])
 
