@@ -1,10 +1,13 @@
 """
 collect_topics.py
 
-Gemini API（google_search_retrieval ツールで Web 検索結果を grounding）で
+Gemini 2.x API（google_search ツールで Web 検索結果を grounding）で
 健康雑学トピック候補を JSON で出力する。
 
 出力: work/topics.json  ([{"title":"...", "body":"...", "sources":["url",...]}, ...])
+
+注: 新しい google-genai SDK を使用。旧 google-generativeai は Gemini 2.x の
+google_search ツールに対応していないため。
 """
 from __future__ import annotations
 
@@ -16,13 +19,13 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 WORK_DIR = Path("work")
 WORK_DIR.mkdir(exist_ok=True)
 TOPICS_OUT = WORK_DIR / "topics.json"
 
-# 検索 grounding 対応モデル
 MODEL = "gemini-2.5-flash"
 
 TARGET_TOPIC_COUNT = 7
@@ -71,27 +74,21 @@ def call_gemini_with_search() -> list[dict]:
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY not set")
 
-    genai.configure(api_key=api_key)
-
-    # Gemini 2.x の google_search ツールで grounding。
-    # 注意: grounding 使用時は response_mime_type=application/json を併用できないので
-    #       生テキストから JSON 部分を抽出する後処理を行う
-    model = genai.GenerativeModel(
-        MODEL,
-        tools=[{"google_search": {}}],
-    )
+    client = genai.Client(api_key=api_key)
 
     prompt = build_prompt()
     print(f"[collect] requesting {TARGET_TOPIC_COUNT} topics from {MODEL} with google_search")
-    response = model.generate_content(
-        prompt,
-        generation_config={
-            "temperature": 0.85,
-            "max_output_tokens": 4096,
-        },
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            temperature=0.85,
+            max_output_tokens=4096,
+        ),
     )
 
-    text = response.text.strip()
+    text = (response.text or "").strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)
 

@@ -16,7 +16,8 @@ import re
 import sys
 from pathlib import Path
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 WORK_DIR = Path("work")
 TOPICS_IN = WORK_DIR / "topics.json"
@@ -85,22 +86,22 @@ def generate_script(topics: list[dict]) -> dict:
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY not set")
 
-    genai.configure(api_key=api_key)
+    client = genai.Client(api_key=api_key)
 
     print(f"[script] generating with {len(topics)} candidate topics ({MODEL})")
-    model = genai.GenerativeModel(
-        MODEL,
-        generation_config={
-            "temperature": 0.7,
-            "top_p": 0.95,
-            "max_output_tokens": 4096,
-            "response_mime_type": "application/json",
-        },
-        system_instruction=SYSTEM_PROMPT,
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=build_user_prompt(topics),
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            temperature=0.7,
+            top_p=0.95,
+            max_output_tokens=4096,
+        ),
     )
-    response = model.generate_content(build_user_prompt(topics))
 
-    text = response.text.strip()
+    text = (response.text or "").strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)
 
