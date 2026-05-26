@@ -25,7 +25,7 @@ WORK_DIR = Path("work")
 TOPICS_IN = WORK_DIR / "topics.json"
 SCRIPT_OUT = WORK_DIR / "script.json"
 
-MODEL = "gemini-2.0-flash"
+MODEL = "gemini-2.5-flash"
 
 # YouTube 説明欄先頭に付与する一般注意書き。健康以外の話題も扱うので汎用文言。
 DISCLAIMER_DESC_PREFIX = (
