@@ -279,6 +279,132 @@ def prepend_description_disclaimer(script: dict) -> dict:
     return script
 
 
+# ============================================================
+# キーワード検証 + 再生成（いらすとや 0 件問題対策）
+# ============================================================
+
+KEYWORD_VALIDATE_HEAD_LIMIT = 3  # 検証時に試すキーワード数（先頭から）
+MAX_REGEN_PER_SCENE = 3
+MIN_FINAL_SCENES = 3
+
+
+def _any_keyword_has_hits(keywords: list[str]) -> bool:
+    """先頭から KEYWORD_VALIDATE_HEAD_LIMIT 個のキーワードを順に試し、
+    最初に search_keyword が hit を返した時点で True を返す（早期 return）。
+    """
+    from src.fetch_irasutoya import search_keyword
+    for kw in keywords[:KEYWORD_VALIDATE_HEAD_LIMIT]:
+        kw = kw.strip()
+        if not kw:
+            continue
+        urls = search_keyword(kw)
+        if urls:
+            return True
+    return False
+
+
+def _regenerate_scene_keywords(client, scene: dict, used_keywords: set[str], failed_keywords: list[str]) -> list[str]:
+    """画像取得 0 件だったシーンに対し、いらすとやで見つかりやすい代替キーワードを 3 個生成する。"""
+    prompt = f"""次のシーンの台本本文に合う、いらすとやで見つかりやすいイラスト検索キーワードを 3 個提案してください。
+
+【シーン台本】
+{scene.get('text', '')}
+
+【条件】
+- 抽象語より具体物（人物・物・行動・動物・食べ物・職業・身体部位など）を優先する
+- 特定人名・固有名詞・専門用語は避ける（いらすとやには無いことが多い）
+- 過去使用済みキーワードと完全重複しないこと: {sorted(used_keywords)}
+- 既に試して 0 件だったキーワード（同じものを返さない）: {failed_keywords}
+
+【出力形式】JSON 配列のみ、3 要素:
+["キーワード1", "キーワード2", "キーワード3"]
+"""
+    try:
+        response = call_with_retry(
+            lambda: client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.4,
+                    max_output_tokens=512,
+                ),
+            ),
+            label="regen-kw",
+        )
+        log_finish_reason(response, "regen-kw")
+        text = (response.text or "").strip()
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```\s*$", "", text)
+        kws = json.loads(text, strict=False)
+        if isinstance(kws, list):
+            return [str(k) for k in kws if isinstance(k, (str,))]
+    except Exception as e:
+        print(f"  [regen-kw error] {type(e).__name__}: {e}")
+    return []
+
+
+def validate_and_repair_scenes(script: dict) -> dict:
+    """各シーンの image_keywords を実際にいらすとやで検索してヒット可否確認。
+    0 件のシーンは最大 MAX_REGEN_PER_SCENE 回、別キーワードを LLM に生成させて再試行。
+    それでも 0 件なら当該シーンを drop。最終的に MIN_FINAL_SCENES 件以上残れば成立。
+    """
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+    client = genai.Client(api_key=api_key)
+
+    scenes = script["scenes"]
+    print(f"[validate] checking {len(scenes)} scenes against irasutoya")
+
+    used_keywords: set[str] = set()
+    final_scenes: list[dict] = []
+
+    for scene in scenes:
+        sid = scene.get("id", "?")
+        original_kws = list(scene.get("image_keywords", []))
+        failed_kws: list[str] = []
+        accepted = False
+
+        for attempt in range(MAX_REGEN_PER_SCENE + 1):  # 初回 + 再生成 N 回
+            kws = scene.get("image_keywords", [])
+            print(f"[validate] scene {sid} attempt {attempt + 1}: kws={kws}")
+            try:
+                if _any_keyword_has_hits(kws):
+                    print(f"[validate] scene {sid} OK")
+                    accepted = True
+                    used_keywords.update(kws)
+                    break
+            except Exception as e:
+                print(f"[validate] scene {sid} search error (treat as miss): {type(e).__name__}: {e}")
+
+            failed_kws.extend(kws)
+            if attempt >= MAX_REGEN_PER_SCENE:
+                break
+
+            print(f"[validate] scene {sid} regenerating keywords")
+            new_kws = _regenerate_scene_keywords(client, scene, used_keywords, failed_kws)
+            if not new_kws:
+                print(f"[validate] scene {sid} regen failed; giving up")
+                break
+            scene["image_keywords"] = new_kws
+
+        if accepted:
+            final_scenes.append(scene)
+        else:
+            print(f"[validate] scene {sid} DROPPED (orig kws: {original_kws})")
+
+    if len(final_scenes) < MIN_FINAL_SCENES:
+        raise RuntimeError(
+            f"after keyword validation only {len(final_scenes)} scenes remain "
+            f"(need >= {MIN_FINAL_SCENES})"
+        )
+
+    script["scenes"] = final_scenes
+    print(f"[validate] final scene count: {len(final_scenes)}")
+    return script
+
+
 def main() -> int:
     if not TOPICS_IN.exists():
         print(f"ERROR: {TOPICS_IN} not found. Run collect_topics.py first.", file=sys.stderr)
@@ -287,6 +413,7 @@ def main() -> int:
     topics = json.loads(TOPICS_IN.read_text(encoding="utf-8"))
     script = generate_script(topics)
     script = validate_script(script)
+    script = validate_and_repair_scenes(script)
     script = prepend_description_disclaimer(script)
 
     SCRIPT_OUT.write_text(
