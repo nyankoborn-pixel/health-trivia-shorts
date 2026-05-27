@@ -284,6 +284,23 @@ def safe_filename(s: str) -> str:
     return s[:60]
 
 
+def _format_time(seconds: float) -> str:
+    """秒数を MM:SS 形式に整形。"""
+    total = int(seconds + 0.5)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _flatten_description(desc: str) -> str:
+    """description から改行と過剰な空白を除去。コピペ用にプレーンテキスト化。"""
+    if not desc:
+        return ""
+    # \r\n / \n / \r を全て空白に
+    desc = re.sub(r"[\r\n]+", " ", desc)
+    # 連続空白を 1 個に圧縮
+    desc = re.sub(r"[ \t　]+", " ", desc)
+    return desc.strip()
+
+
 def main() -> int:
     for p in (SCRIPT_IN, AUDIO_INFO_IN, IMAGES_INFO_IN):
         if not p.exists():
@@ -302,6 +319,8 @@ def main() -> int:
     images = images_info["images"]
 
     clip_paths: list[Path] = []
+    timeline: list[dict] = []
+    cumulative = 0.0
     for i, scene in enumerate(scenes):
         sid = scene.get("id", f"{i+1:02d}")
         ai = audio_scenes[i]
@@ -310,7 +329,6 @@ def main() -> int:
         if sid not in images:
             print(f"WARN: no image for scene {sid}, skipping clip", file=sys.stderr)
             continue
-        # images[sid] は list（複数画像）。後方互換で str 単体も許容
         raw_imgs = images[sid]
         if isinstance(raw_imgs, str):
             raw_imgs = [raw_imgs]
@@ -321,6 +339,19 @@ def main() -> int:
             duration=duration, out_path=clip_out, font_bold=font_bold,
         )
         clip_paths.append(clip_out)
+        # シーン単位のタイムライン（concat 時点での開始/終了秒）
+        summary = scene.get("text", "") or ""
+        summary = re.sub(r"\s+", " ", summary).strip()
+        if len(summary) > 40:
+            summary = summary[:40] + "…"
+        timeline.append({
+            "id": sid,
+            "start": _format_time(cumulative),
+            "end": _format_time(cumulative + duration),
+            "duration_sec": round(duration, 2),
+            "summary": summary,
+        })
+        cumulative += duration
 
     if not clip_paths:
         print("ERROR: no clips generated", file=sys.stderr)
@@ -338,11 +369,13 @@ def main() -> int:
     final = OUTPUT_DIR / f"{today}_{title_safe}.mp4"
     mix_bgm(raw_path, BGM_PATH, final)
 
-    # メタ情報も併置（YouTube 説明欄用）
+    # メタ情報も併置（YouTube 説明欄用）。description は改行除去してコピペしやすく
     meta = {
         "title": script.get("title"),
-        "description": script.get("description", ""),
-        "scenes": len(scenes),
+        "description": _flatten_description(script.get("description", "")),
+        "scene_count": len(timeline),
+        "total_duration": _format_time(cumulative),
+        "timeline": timeline,
         "video_path": str(final.resolve()),
     }
     (OUTPUT_DIR / f"{today}_{title_safe}.json").write_text(
