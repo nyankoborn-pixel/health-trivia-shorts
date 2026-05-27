@@ -25,6 +25,7 @@ import random
 import re
 import sys
 import time
+import traceback
 import urllib.parse
 from pathlib import Path
 
@@ -56,54 +57,67 @@ def polite_sleep():
     time.sleep(SLEEP_BETWEEN_REQUESTS + random.uniform(0, 0.5))
 
 
-def fetch(url: str) -> str:
-    """HTML を取得"""
+def fetch(url: str) -> str | None:
+    """HTML を取得。失敗時は None を返し、例外で全パイプラインを落とさない。"""
     print(f"  [fetch] {url}")
-    r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
-    r.raise_for_status()
-    return r.text
+    try:
+        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+        r.raise_for_status()
+        return r.text
+    except Exception as e:
+        print(f"  [error] fetch failed: {type(e).__name__}: {e}")
+        return None
 
 
 def search_keyword(keyword: str) -> list[str]:
-    """検索結果ページから記事 URL を最大 MAX_FALLBACK_RESULTS 件取得"""
+    """検索結果ページから記事 URL を最大 MAX_FALLBACK_RESULTS 件取得。失敗時は空リスト。"""
     url = SEARCH_URL.format(q=urllib.parse.quote(keyword))
     html = fetch(url)
     polite_sleep()
-    soup = BeautifulSoup(html, "lxml")
-
-    # 記事カードのリンク: <div class="boxmeta clearfix"><h2><a href="..."></a></h2></div>
-    article_urls: list[str] = []
-    for a in soup.select("div.boxmeta.clearfix h2 a[href]"):
-        href = a.get("href")
-        if href and href.startswith("https://www.irasutoya.com/") and ".html" in href:
-            if href in article_urls:
-                continue
-            article_urls.append(href)
-            if len(article_urls) >= MAX_FALLBACK_RESULTS:
-                break
-    return article_urls
+    if html is None:
+        return []
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        article_urls: list[str] = []
+        for a in soup.select("div.boxmeta.clearfix h2 a[href]"):
+            href = a.get("href")
+            if href and href.startswith("https://www.irasutoya.com/") and ".html" in href:
+                if href in article_urls:
+                    continue
+                article_urls.append(href)
+                if len(article_urls) >= MAX_FALLBACK_RESULTS:
+                    break
+        return article_urls
+    except Exception as e:
+        print(f"  [error] search_keyword parse failed: {type(e).__name__}: {e}")
+        return []
 
 
 def extract_image_url(article_url: str) -> str | None:
-    """記事ページから画像本体 URL を抽出"""
+    """記事ページから画像本体 URL を抽出。失敗時は None。"""
     html = fetch(article_url)
     polite_sleep()
-    soup = BeautifulSoup(html, "lxml")
-
-    # 投稿本文の中の <a href="...png"><img src="..."></a> の a タグから本体 URL
-    post_body = soup.select_one("div.entry, div.post-body, div.entry-content")
-    if not post_body:
-        post_body = soup
-    for a in post_body.select("a[href]"):
-        href = a["href"]
-        if re.search(r"\.(png|jpe?g)(\?|$)", href, re.IGNORECASE):
-            return href
-    # fallback: 最初の大きめの img
-    for img in post_body.select("img[src]"):
-        src = img["src"]
-        if re.search(r"\.(png|jpe?g)(\?|$)", src, re.IGNORECASE):
-            return src
-    return None
+    if html is None:
+        return None
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        post_body = soup.select_one("div.entry, div.post-body, div.entry-content")
+        if not post_body:
+            post_body = soup
+        for a in post_body.select("a[href]"):
+            href = a["href"]
+            if re.search(r"\.(png|jpe?g)(\?|$)", href, re.IGNORECASE):
+                return href
+        # fallback: 最初の大きめの img
+        for img in post_body.select("img[src]"):
+            src = img["src"]
+            if re.search(r"\.(png|jpe?g)(\?|$)", src, re.IGNORECASE):
+                return src
+        print(f"  [miss] no image url found in article")
+        return None
+    except Exception as e:
+        print(f"  [error] extract_image_url parse failed: {type(e).__name__}: {e}")
+        return None
 
 
 def cache_path_for(image_url: str) -> Path:
@@ -114,39 +128,58 @@ def cache_path_for(image_url: str) -> Path:
 
 
 def download_image(image_url: str) -> Path | None:
-    """画像をキャッシュへダウンロード（既にあればスキップ）。
-
-    マジックバイトで PNG / JPEG であることを確認。
-    HTML 404 ページなど画像でないレスポンスは捨てて None を返す。
-    """
-    p = cache_path_for(image_url)
+    """画像をキャッシュへダウンロード（既にあればスキップ）。失敗時は None を返す。"""
+    try:
+        p = cache_path_for(image_url)
+    except Exception as e:
+        print(f"  [error] cache_path_for failed: {type(e).__name__}: {e}")
+        return None
     if p.exists() and p.stat().st_size > 0:
+        print(f"  [cached] {p.name}")
         return p
     print(f"  [dl] {image_url}")
-    r = requests.get(image_url, headers={"User-Agent": USER_AGENT}, timeout=30)
-    r.raise_for_status()
-    data = r.content
+    try:
+        r = requests.get(image_url, headers={"User-Agent": USER_AGENT}, timeout=30)
+        r.raise_for_status()
+        data = r.content
+    except Exception as e:
+        print(f"  [error] download failed: {type(e).__name__}: {e}")
+        polite_sleep()
+        return None
     if not any(data.startswith(m) for m in _IMG_MAGIC):
         print(f"  [skip] not an image (first 8 bytes: {data[:8]!r})")
         polite_sleep()
         return None
-    p.write_bytes(data)
+    try:
+        p.write_bytes(data)
+    except Exception as e:
+        print(f"  [error] write failed: {type(e).__name__}: {e}")
+        polite_sleep()
+        return None
     polite_sleep()
     return p
 
 
 def _try_articles(article_urls: list[str], exclude: set[Path]) -> Path | None:
-    """検索結果の記事 URL 群を順に試し、exclude に含まれない最初の画像を返す。"""
+    """検索結果の記事 URL 群を順に試し、exclude に含まれない最初の画像を返す。
+    1 記事の処理で例外が出ても次の記事に進む。
+    """
     for url in article_urls:
-        image_url = extract_image_url(url)
-        if not image_url:
+        try:
+            image_url = extract_image_url(url)
+            if not image_url:
+                continue
+            img = download_image(image_url)
+            if img is None:
+                continue
+            if img in exclude:
+                print(f"  [dup] already used, trying next: {img.name}")
+                continue
+            return img
+        except Exception as e:
+            print(f"  [error] _try_articles for {url}: {type(e).__name__}: {e}")
+            traceback.print_exc()
             continue
-        img = download_image(image_url)
-        if img is None:
-            continue
-        if img in exclude:
-            continue
-        return img
     return None
 
 
