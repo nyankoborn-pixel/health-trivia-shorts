@@ -228,11 +228,24 @@ def validate_topics(topics: list[dict]) -> list[dict]:
     return valid
 
 
+MIN_TOPICS_OK = 5      # この件数以上ならそのまま採用
+MIN_TOPICS_ACCEPT = 3  # この件数未満なら失敗扱い
+
+
 def main() -> int:
-    topics = call_gemini_with_search()
-    topics = validate_topics(topics)
-    if len(topics) < 5:
-        print(f"ERROR: only {len(topics)} valid topics, need at least 5", file=sys.stderr)
+    # 1回目で 5 件未満なら 1 回だけ再試行（Gemini 混雑時に短く打ち切られるケース対策）
+    topics: list[dict] = []
+    for attempt in range(2):
+        topics = call_gemini_with_search()
+        topics = validate_topics(topics)
+        print(f"[collect] attempt {attempt + 1}: {len(topics)} valid topics")
+        if len(topics) >= MIN_TOPICS_OK:
+            break
+        if attempt == 0:
+            print(f"[collect] under threshold ({MIN_TOPICS_OK}); retrying once")
+
+    if len(topics) < MIN_TOPICS_ACCEPT:
+        print(f"ERROR: only {len(topics)} valid topics after retry, need at least {MIN_TOPICS_ACCEPT}", file=sys.stderr)
         return 1
 
     TOPICS_OUT.write_text(
@@ -240,7 +253,7 @@ def main() -> int:
         encoding="utf-8",
     )
     print(f"[collect] {len(topics)} topics saved to {TOPICS_OUT}")
-    for t in topics[:5]:
+    for t in topics[:7]:
         print(f"  - {t['title']}")
 
     # 履歴に追記（次回ビルドの重複防止のため）

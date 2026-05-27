@@ -85,7 +85,15 @@ def build_user_prompt(topics: list[dict]) -> str:
         f"【候補 {i+1}】\nタイトル: {t['title']}\n本文: {t['body']}"
         for i, t in enumerate(topics)
     )
-    return f"""以下のトピック候補から 5〜6 個を選び、台本 JSON を生成してください。
+    n = len(topics)
+    if n >= 6:
+        instruction = "以下のトピック候補から 5〜6 個を選び、台本 JSON を生成してください。"
+    elif n == 5:
+        instruction = "以下の 5 トピックすべてを使って 5 シーンの台本 JSON を生成してください。"
+    else:  # 3 or 4
+        instruction = f"以下の {n} トピックすべてを使って {n} シーンの台本 JSON を生成してください。各シーンで尺をやや長め（40〜45 秒）に取って 3 分前後に収めること。"
+
+    return f"""{instruction}
 
 {topics_block}
 
