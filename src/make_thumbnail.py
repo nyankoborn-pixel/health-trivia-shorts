@@ -53,7 +53,7 @@ def wrap_for_thumb(s: str, width: int) -> list[str]:
     return lines
 
 
-def main() -> int:
+def _main_inner() -> int:
     if not SCRIPT_IN.exists() or not IMAGES_INFO_IN.exists():
         print(f"ERROR: required inputs not found", file=sys.stderr)
         return 1
@@ -125,6 +125,18 @@ def main() -> int:
     canvas.save(out, "JPEG", quality=92)
     print(f"[thumb] saved: {out} ({out.stat().st_size // 1024} KB)")
     return 0
+
+
+def main() -> int:
+    """サムネ生成は付加要素。失敗しても warn のみで rc=0 を返す（動画本体の release を妨げない）。"""
+    try:
+        return _main_inner()
+    except Exception as e:
+        import traceback
+        print(f"[thumb] WARN: thumbnail generation failed: {type(e).__name__}: {e}", file=sys.stderr)
+        traceback.print_exc()
+        print("[thumb] continuing without thumbnail")
+        return 0
 
 
 if __name__ == "__main__":

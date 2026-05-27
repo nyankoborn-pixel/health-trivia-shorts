@@ -22,7 +22,7 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 
-from src.gemini_retry import call_with_retry
+from src.gemini_retry import call_with_retry, log_finish_reason
 
 WORK_DIR = Path("work")
 WORK_DIR.mkdir(exist_ok=True)
@@ -162,37 +162,56 @@ def call_gemini_with_search() -> list[dict]:
             config=types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
                 temperature=0.85,
-                max_output_tokens=8192,
+                max_output_tokens=16384,
             ),
         ),
         label="collect-step1",
     )
+    log_finish_reason(research, "collect-step1")
     research_text = (research.text or "").strip()
     (WORK_DIR / "_collect_raw.txt").write_text(research_text, encoding="utf-8")
     if not research_text:
         raise RuntimeError("Step 1 grounding returned empty (safety filter?)")
     print(f"[collect] step1 done: {len(research_text)} chars of research")
 
-    # === Step 2: JSON モードで構造化（grounding なし、温度低め）===
-    print(f"[collect] step2: structuring to JSON")
-    structured = call_with_retry(
-        lambda: client.models.generate_content(
-            model=MODEL,
-            contents=build_structuring_prompt(research_text),
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.2,
-                max_output_tokens=8192,
+    # === Step 2: JSON モードで構造化（grounding なし、温度低め、JSON 失敗時 1 回再試行）===
+    topics = None
+    last_err: Exception | None = None
+    for attempt in range(2):
+        print(f"[collect] step2: structuring to JSON (attempt {attempt + 1})")
+        structured = call_with_retry(
+            lambda: client.models.generate_content(
+                model=MODEL,
+                contents=build_structuring_prompt(research_text),
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.2,
+                    max_output_tokens=16384,
+                ),
             ),
-        ),
-        label="collect-step2",
-    )
-    json_text = (structured.text or "").strip()
-    (WORK_DIR / "_collect_json.txt").write_text(json_text, encoding="utf-8")
-    if not json_text:
-        raise RuntimeError("Step 2 JSON structuring returned empty")
+            label="collect-step2",
+        )
+        log_finish_reason(structured, f"collect-step2-attempt{attempt + 1}")
+        json_text = (structured.text or "").strip()
+        (WORK_DIR / f"_collect_json_{attempt}.txt").write_text(json_text, encoding="utf-8")
+        if not json_text:
+            last_err = RuntimeError("Step 2 returned empty")
+            if attempt == 0:
+                continue
+            raise last_err
+        try:
+            topics = _safe_json_loads(json_text)
+            break
+        except json.JSONDecodeError as e:
+            last_err = e
+            print(f"[collect] step2 JSON parse failed: {e}")
+            if attempt == 0:
+                print("[collect] retrying step2")
+                continue
+            raise
 
-    topics = _safe_json_loads(json_text)
+    if topics is None:
+        raise RuntimeError(f"collect step2 failed: {last_err}")
     if not isinstance(topics, list):
         raise RuntimeError(f"expected list, got {type(topics)}")
     return topics
@@ -233,19 +252,31 @@ MIN_TOPICS_ACCEPT = 3  # この件数未満なら失敗扱い
 
 
 def main() -> int:
-    # 1回目で 5 件未満なら 1 回だけ再試行（Gemini 混雑時に短く打ち切られるケース対策）
+    # 1回目で 5 件未満 or 例外なら 1 回だけ再試行（Gemini 混雑時の短縮応答や transient エラー対策）
+    import traceback as _tb
     topics: list[dict] = []
+    last_err: Exception | None = None
     for attempt in range(2):
-        topics = call_gemini_with_search()
-        topics = validate_topics(topics)
-        print(f"[collect] attempt {attempt + 1}: {len(topics)} valid topics")
-        if len(topics) >= MIN_TOPICS_OK:
-            break
-        if attempt == 0:
-            print(f"[collect] under threshold ({MIN_TOPICS_OK}); retrying once")
+        try:
+            topics = call_gemini_with_search()
+            topics = validate_topics(topics)
+            print(f"[collect] attempt {attempt + 1}: {len(topics)} valid topics")
+            if len(topics) >= MIN_TOPICS_OK:
+                break
+            if attempt == 0:
+                print(f"[collect] under threshold ({MIN_TOPICS_OK}); retrying once")
+        except Exception as e:
+            last_err = e
+            print(f"[collect] attempt {attempt + 1} crashed: {type(e).__name__}: {e}", file=sys.stderr)
+            _tb.print_exc()
+            if attempt == 0:
+                print(f"[collect] retrying once after exception")
 
     if len(topics) < MIN_TOPICS_ACCEPT:
-        print(f"ERROR: only {len(topics)} valid topics after retry, need at least {MIN_TOPICS_ACCEPT}", file=sys.stderr)
+        if last_err is not None and len(topics) == 0:
+            print(f"ERROR: collect failed: {type(last_err).__name__}: {last_err}", file=sys.stderr)
+        else:
+            print(f"ERROR: only {len(topics)} valid topics after retry, need at least {MIN_TOPICS_ACCEPT}", file=sys.stderr)
         return 1
 
     TOPICS_OUT.write_text(

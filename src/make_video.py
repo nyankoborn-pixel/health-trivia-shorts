@@ -213,13 +213,23 @@ def make_scene_clip(
         str(out_path),
     ]
     print(f"  [scene {index}] {duration:.2f}s, {n_imgs} imgs, {len(subtitles)} subs -> {out_path.name}")
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        log_file = WORK_DIR / f"_ffmpeg_scene_{index:02d}.log"
-        log_file.write_text(r.stderr, encoding="utf-8")
-        (WORK_DIR / f"_ffmpeg_scene_{index:02d}.filter.txt").write_text(filter_complex, encoding="utf-8")
-        print(r.stderr[-3000:], file=sys.stderr)
-        raise RuntimeError(f"ffmpeg failed for scene {index} (full log: {log_file})")
+    # 1 回だけリトライ（一時的な encoder ノイズや I/O ブリップ対策）
+    last_stderr = ""
+    for attempt in range(2):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            if attempt > 0:
+                print(f"  [scene {index}] ffmpeg succeeded on retry")
+            return
+        last_stderr = r.stderr
+        if attempt == 0:
+            print(f"  [scene {index}] ffmpeg failed (rc={r.returncode}), retrying once")
+    # ここに来たら 2 回とも失敗
+    log_file = WORK_DIR / f"_ffmpeg_scene_{index:02d}.log"
+    log_file.write_text(last_stderr, encoding="utf-8")
+    (WORK_DIR / f"_ffmpeg_scene_{index:02d}.filter.txt").write_text(filter_complex, encoding="utf-8")
+    print(last_stderr[-3000:], file=sys.stderr)
+    raise RuntimeError(f"ffmpeg failed for scene {index} after 2 attempts (full log: {log_file})")
 
 
 def concat_clips(clip_paths: list[Path], out_path: Path) -> None:

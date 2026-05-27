@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import requests
@@ -25,7 +26,8 @@ SPEAKER_ID = int(os.environ.get("VOICEVOX_SPEAKER_ID", "13"))  # 青山龍星 �
 SPEED_SCALE = float(os.environ.get("VOICEVOX_SPEED", "1.0"))
 
 
-def synth_one(text: str, out_path: Path) -> float:
+def _synth_once(text: str, out_path: Path) -> float:
+    """VOICEVOX を 1 回呼んで WAV を書き、秒数を返す。"""
     r = requests.post(
         f"{VOICEVOX_URL}/audio_query",
         params={"text": text, "speaker": SPEAKER_ID},
@@ -51,6 +53,21 @@ def synth_one(text: str, out_path: Path) -> float:
         capture_output=True, text=True, check=True,
     )
     return float(probe.stdout.strip())
+
+
+def synth_one(text: str, out_path: Path, max_attempts: int = 3) -> float:
+    """VOICEVOX 呼び出しを軽量リトライ付きで実行。"""
+    last_err: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return _synth_once(text, out_path)
+        except Exception as e:
+            last_err = e
+            if attempt < max_attempts - 1:
+                wait = 3 * (attempt + 1)  # 3, 6, 9...
+                print(f"  [synth-retry {attempt + 1}/{max_attempts}] {type(e).__name__}: {e}; waiting {wait}s")
+                time.sleep(wait)
+    raise RuntimeError(f"VOICEVOX synth failed after {max_attempts} attempts: {last_err}")
 
 
 def main() -> int:

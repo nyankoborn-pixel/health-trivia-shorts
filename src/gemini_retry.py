@@ -38,3 +38,18 @@ def call_with_retry(fn: Callable[[], T], *, max_retries: int = 5, label: str = "
             time.sleep(wait)
     # 到達不可（最後の attempt で raise されるため）だが型のため
     raise RuntimeError(f"{label}: retries exhausted")
+
+
+def log_finish_reason(response, label: str) -> None:
+    """Gemini レスポンスの finish_reason をログ出力（MAX_TOKENS / SAFETY / 等の原因切り分け用）。"""
+    try:
+        candidates = getattr(response, "candidates", None)
+        if not candidates:
+            return
+        cand = candidates[0]
+        finish = getattr(cand, "finish_reason", None)
+        if finish is not None:
+            print(f"  [{label}] finish_reason={finish}")
+    except Exception:
+        # 診断ログなので失敗しても本体に影響させない
+        pass

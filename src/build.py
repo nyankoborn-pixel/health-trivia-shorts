@@ -32,8 +32,14 @@ STEPS = [
 def run_step(name: str, module_path: str) -> int:
     print(f"\n{'=' * 60}\n[{name}] {module_path}\n{'=' * 60}")
     t0 = time.time()
-    mod = importlib.import_module(module_path)
-    rc = mod.main()
+    try:
+        mod = importlib.import_module(module_path)
+        rc = mod.main()
+    except Exception as e:
+        import traceback
+        print(f"[{name}] CRASHED: {type(e).__name__}: {e}", file=sys.stderr)
+        traceback.print_exc()
+        rc = 1
     elapsed = time.time() - t0
     print(f"[{name}] rc={rc} elapsed={elapsed:.1f}s")
     return rc

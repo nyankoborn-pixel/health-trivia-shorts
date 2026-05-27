@@ -19,7 +19,7 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 
-from src.gemini_retry import call_with_retry
+from src.gemini_retry import call_with_retry, log_finish_reason
 
 WORK_DIR = Path("work")
 TOPICS_IN = WORK_DIR / "topics.json"
@@ -145,6 +145,7 @@ def generate_script(topics: list[dict]) -> dict:
     last_err: Exception | None = None
     for attempt in range(2):
         response = _call_gemini_for_script(client, topics)
+        log_finish_reason(response, f"script-attempt{attempt + 1}")
         text = (response.text or "").strip()
         # raw レスポンス保存（attempt ごとに別ファイル）
         (WORK_DIR / f"_script_raw_{attempt}.txt").write_text(text, encoding="utf-8")

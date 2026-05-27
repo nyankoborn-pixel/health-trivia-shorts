@@ -241,55 +241,61 @@ def main() -> int:
 
     for i, scene in enumerate(scenes):
         sid = scene.get("id", f"{i+1:02d}")
-        kws = scene.get("image_keywords", [])
-        n_target = DISCLAIMER_PER_SCENE if sid == "disclaimer" else DEFAULT_PER_SCENE
-        print(f"\n[scene {sid}] keywords: {kws} (target {n_target} images, cap={len(all_used)}/{IMAGE_CAP})")
+        # 1 シーンの予期せぬ例外でパイプライン全体を殺さない（このシーンだけ missing 扱い）
+        try:
+            kws = scene.get("image_keywords", [])
+            n_target = DISCLAIMER_PER_SCENE if sid == "disclaimer" else DEFAULT_PER_SCENE
+            print(f"\n[scene {sid}] keywords: {kws} (target {n_target} images, cap={len(all_used)}/{IMAGE_CAP})")
 
-        scene_imgs: list[Path] = []
+            scene_imgs: list[Path] = []
 
-        # === Stage 1: ユニーク画像取得（残り枠の範囲で）===
-        for slot in range(n_target):
-            if len(all_used) >= IMAGE_CAP:
-                print(f"  [cap] reached {IMAGE_CAP} unique images; switching to reuse mode")
-                break
-            img = find_one_image(kws, exclude=set(all_used) | set(scene_imgs))
-            if img is None:
-                print(f"  [miss] no fresh image found for slot {slot}")
-                break
-            scene_imgs.append(img)
-            all_used.append(img)
-            print(f"  + slot {slot}: {img.name} (unique now {len(all_used)})")
+            # === Stage 1: ユニーク画像取得（残り枠の範囲で）===
+            for slot in range(n_target):
+                if len(all_used) >= IMAGE_CAP:
+                    print(f"  [cap] reached {IMAGE_CAP} unique images; switching to reuse mode")
+                    break
+                img = find_one_image(kws, exclude=set(all_used) | set(scene_imgs))
+                if img is None:
+                    print(f"  [miss] no fresh image found for slot {slot}")
+                    break
+                scene_imgs.append(img)
+                all_used.append(img)
+                print(f"  + slot {slot}: {img.name} (unique now {len(all_used)})")
 
-        # === Stage 2: 不足分は既出画像から使い回し ===
-        if len(scene_imgs) < n_target:
-            if not all_used:
-                # 1 枚も無いとき: disclaimer は固定フォールバック
-                if sid == "disclaimer" and DISCLAIMER_FALLBACK.exists():
-                    scene_imgs.append(DISCLAIMER_FALLBACK)
-                    print(f"  [fallback] using bundled disclaimer image")
-            while len(scene_imgs) < n_target and all_used:
-                # 同シーン内重複を避けつつ random pick
-                candidates = [p for p in all_used if p not in scene_imgs]
-                if not candidates:
-                    candidates = all_used  # 仕方なく重複
-                pick = _random.choice(candidates)
-                scene_imgs.append(pick)
-                print(f"  ↺ slot {len(scene_imgs) - 1}: reused {pick.name}")
+            # === Stage 2: 不足分は既出画像から使い回し ===
+            if len(scene_imgs) < n_target:
+                if not all_used:
+                    # 1 枚も無いとき: disclaimer は固定フォールバック
+                    if sid == "disclaimer" and DISCLAIMER_FALLBACK.exists():
+                        scene_imgs.append(DISCLAIMER_FALLBACK)
+                        print(f"  [fallback] using bundled disclaimer image")
+                while len(scene_imgs) < n_target and all_used:
+                    candidates = [p for p in all_used if p not in scene_imgs]
+                    if not candidates:
+                        candidates = all_used
+                    pick = _random.choice(candidates)
+                    scene_imgs.append(pick)
+                    print(f"  ↺ slot {len(scene_imgs) - 1}: reused {pick.name}")
 
-        if not scene_imgs:
-            print(f"  [WARN] no image found for scene {sid}")
+            if not scene_imgs:
+                print(f"  [WARN] no image found for scene {sid}")
+                missing.append(sid)
+                continue
+
+            # シーンごとに images_dir へコピー（make_video が使うパス）
+            out_paths: list[str] = []
+            for j, img in enumerate(scene_imgs):
+                ext = img.suffix
+                dst = IMAGES_DIR / f"scene_{i:02d}_{j:02d}{ext}"
+                dst.write_bytes(img.read_bytes())
+                out_paths.append(str(dst.resolve()))
+            image_map[sid] = out_paths
+            print(f"  -> {len(out_paths)} image(s) placed")
+        except Exception as e:
+            print(f"  [ERROR] scene {sid} crashed: {type(e).__name__}: {e}", file=sys.stderr)
+            traceback.print_exc()
             missing.append(sid)
             continue
-
-        # シーンごとに images_dir へコピー（make_video が使うパス）
-        out_paths: list[str] = []
-        for j, img in enumerate(scene_imgs):
-            ext = img.suffix
-            dst = IMAGES_DIR / f"scene_{i:02d}_{j:02d}{ext}"
-            dst.write_bytes(img.read_bytes())
-            out_paths.append(str(dst.resolve()))
-        image_map[sid] = out_paths
-        print(f"  -> {len(out_paths)} image(s) placed")
 
     IMAGES_OUT.write_text(
         json.dumps({"images": image_map, "missing": missing}, ensure_ascii=False, indent=2),
