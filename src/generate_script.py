@@ -101,15 +101,9 @@ def build_user_prompt(topics: list[dict]) -> str:
 """
 
 
-def generate_script(topics: list[dict]) -> dict:
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY not set")
-
-    client = genai.Client(api_key=api_key)
-
-    print(f"[script] generating with {len(topics)} candidate topics ({MODEL})")
-    response = call_with_retry(
+def _call_gemini_for_script(client, topics: list[dict]):
+    """Gemini を 1 回呼び出してレスポンスを返す。"""
+    return call_with_retry(
         lambda: client.models.generate_content(
             model=MODEL,
             contents=build_user_prompt(topics),
@@ -118,37 +112,69 @@ def generate_script(topics: list[dict]) -> dict:
                 response_mime_type="application/json",
                 temperature=0.7,
                 top_p=0.95,
-                max_output_tokens=8192,
+                max_output_tokens=16384,
             ),
         ),
         label="generate_script",
     )
 
-    text = (response.text or "").strip()
-    (WORK_DIR / "_script_raw.txt").write_text(text, encoding="utf-8")
-    print(f"[script] response: {len(text)} chars")
-    if not text:
-        # safety filter / blocked / quota 切れ等
-        try:
-            cand = response.candidates[0] if response.candidates else None
-            finish = getattr(cand, "finish_reason", "unknown") if cand else "no-candidate"
-        except Exception:
-            finish = "unknown"
-        raise RuntimeError(f"Gemini returned empty response for script (finish_reason={finish})")
 
+def _parse_script_json(text: str) -> dict:
+    """サニタイズしつつ JSON を読む。読めなければ例外を上に伝える。"""
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)
-
     try:
-        parsed = json.loads(text, strict=False)
+        return json.loads(text, strict=False)
     except json.JSONDecodeError:
         sanitized = "".join(
             " " if (ord(c) < 32 and c not in "\t\n\r") else c
             for c in text
         )
-        parsed = json.loads(sanitized, strict=False)
+        return json.loads(sanitized, strict=False)
 
-    # validate 前にパース結果を dump（validate でこけた時に中身を確認できる）
+
+def generate_script(topics: list[dict]) -> dict:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not set")
+
+    client = genai.Client(api_key=api_key)
+
+    print(f"[script] generating with {len(topics)} candidate topics ({MODEL})")
+    parsed = None
+    last_err: Exception | None = None
+    for attempt in range(2):
+        response = _call_gemini_for_script(client, topics)
+        text = (response.text or "").strip()
+        # raw レスポンス保存（attempt ごとに別ファイル）
+        (WORK_DIR / f"_script_raw_{attempt}.txt").write_text(text, encoding="utf-8")
+        print(f"[script] attempt {attempt + 1} response: {len(text)} chars")
+        if not text:
+            try:
+                cand = response.candidates[0] if response.candidates else None
+                finish = getattr(cand, "finish_reason", "unknown") if cand else "no-candidate"
+            except Exception:
+                finish = "unknown"
+            last_err = RuntimeError(f"Gemini returned empty response (finish_reason={finish})")
+            if attempt == 0:
+                print("[script] empty response; retrying")
+                continue
+            raise last_err
+        try:
+            parsed = _parse_script_json(text)
+            break
+        except json.JSONDecodeError as e:
+            last_err = e
+            print(f"[script] JSON parse failed at attempt {attempt + 1}: {e}")
+            if attempt == 0:
+                print("[script] retrying with fresh generation")
+                continue
+            raise
+
+    if parsed is None:
+        raise RuntimeError(f"generate_script failed after retries: {last_err}")
+
+    # validate 前にパース結果を dump
     (WORK_DIR / "_script_parsed.json").write_text(
         json.dumps(parsed, ensure_ascii=False, indent=2),
         encoding="utf-8",
