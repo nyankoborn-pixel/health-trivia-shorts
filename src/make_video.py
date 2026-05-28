@@ -258,20 +258,22 @@ def mix_bgm(in_video: Path, bgm_path: Path, out_video: Path, bgm_db: int = BGM_V
     """ナレーション動画に BGM をシームレスループでミックス。
     -stream_loop -1 で無限ループ入力にし、-shortest で動画長に合わせて打ち切る。
     """
+    # amix は入力数で自動正規化（2 入力なら全体 -6dB）するため、mix 後に +6dB 戻す。
+    # これでナレーションは元の音量を保持しつつ、BGM との相対差は bgm_db のまま。
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "warning",
         "-i", str(in_video),
         "-stream_loop", "-1", "-i", str(bgm_path),
         "-filter_complex",
         f"[1:a]volume={bgm_db}dB[bgm];"
-        f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout]",
+        f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0,volume=6dB[aout]",
         "-map", "0:v", "-map", "[aout]",
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
         "-shortest",
         str(out_video),
     ]
-    print(f"[bgm-mix] -> {out_video.name} (volume {bgm_db}dB, seamless loop)")
+    print(f"[bgm-mix] -> {out_video.name} (narr 0dB, bgm {bgm_db}dB, seamless loop)")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stderr[-3000:], file=sys.stderr)
