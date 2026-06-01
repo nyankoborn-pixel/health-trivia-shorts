@@ -2,9 +2,6 @@ name: Build health trivia video
 
 on:
   workflow_dispatch:
-  schedule:
-    # 毎日 22:00 JST = 13:00 UTC に自動生成
-    - cron: "0 13 * * *"
 
 jobs:
   build:
